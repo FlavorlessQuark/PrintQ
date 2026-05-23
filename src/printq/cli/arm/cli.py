@@ -3,7 +3,8 @@
 from contextlib import contextmanager
 from logging import getLogger
 from typing import TYPE_CHECKING
-
+from ikpy.chain import Chain
+from ikpy.link import OriginLink, URDFLink
 import click
 
 from printq.cli import console
@@ -14,7 +15,7 @@ if TYPE_CHECKING:
     from printq.arm.piper import PiperArm
 
 logger = getLogger(__name__)
-
+chain = None
 
 @click.group(name="arm")
 @click.pass_context

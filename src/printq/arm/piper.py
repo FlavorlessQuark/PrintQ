@@ -1,6 +1,8 @@
 """Piper ARM control."""
 
 import time
+from ikpy.chain import chain
+from ikpy.link import OriginLink, URDFLink
 from logging import getLogger
 
 from piper_control import piper_init, piper_interface
@@ -30,6 +32,8 @@ class PiperArm:
     GRIPPER_CLOSED_POSITION = 0.0
     GRIPPER_DEFAULT_EFFORT = 1.0
 
+    chain = None
+
     def __init__(self, can_port: str = "can0"):
         """Initialize the PiperArm."""
         logger.info(f"Initializing PiperArm on {can_port}")
@@ -46,6 +50,29 @@ class PiperArm:
         logger.info("Resetting the GRIPPER")
         piper_init.reset_gripper(self.piper)
         logger.info("PiperArm initialized")
+        self.chain = chain.from_urdf_file("piper_description.urdf")
+
+    def move_ik(current, endpos):
+        ik_solution = chain.inverse_kinematics(
+            target_position=target_position,
+            target_orientation=target_orientation,
+            initial_position=current
+        )
+        tolerance = 1e-5
+            
+        for i, link in enumerate(chain.links):
+            if link.bounds is None or len(link.bounds) != 2:
+                continue
+                
+            lower_limit, upper_limit = link.bounds
+            joint_angle = ik_solution[i]
+            
+            if joint_angle < (lower_limit - tolerance) or joint_angle > (upper_limit + tolerance):
+                print("Out of bounds")
+                
+        return ik_solution
+
+
 
     def get_joint_positions(self) -> tuple[float, ...]:
         """Get the joint positions of the ARM.

@@ -13,10 +13,10 @@ class PiperArm:
 
     JOINT_POSITIONS_ZERO = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
     JOINT_POSITIONS_READY = (0.04, 0.45, -1.5, 0.0, 1.0, 0.0)
-    JOINT_POSITIONS_PREGRASP = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-    JOINT_POSITIONS_SCAN = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-    JOINT_POSITIONS_GOOD_BIN = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-    JOINT_POSITIONS_BAD_BIN = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    JOINT_POSITIONS_PREGRASP = (0.02, 1.87, -0.53, 0.04, -1.24, 0.08)
+    JOINT_POSITIONS_SCAN = (1.23, -0.01, -0.52, -0.01, 0.58, 0.01)
+    JOINT_POSITIONS_GOOD_BIN = (-0.46, 1.84, -0.72, 0.02, -0.69, 0.02)
+    JOINT_POSITIONS_BAD_BIN = (0.63, 1.84, -0.73, 0.02, -0.69, 0.02)
     # Gripper "ready" pose. Position is in meters (V2) or radians (V1);
     # effort is in wrapper units where 1.0 corresponds to the SDK demo's
     # default torque of 1000.
@@ -26,6 +26,9 @@ class PiperArm:
     GRIPPER_PREGRASP_EFFORT = 1.0
     GRIPPER_BIN_POSITION = 10.0
     GRIPPER_BIN_EFFORT = 1.0
+    GRIPPER_OPEN_POSITION = 10.0
+    GRIPPER_CLOSED_POSITION = 0.0
+    GRIPPER_DEFAULT_EFFORT = 1.0
 
     def __init__(self, can_port: str = "can0"):
         """Initialize the PiperArm."""
@@ -114,6 +117,70 @@ class PiperArm:
             effort=self.GRIPPER_BIN_EFFORT,
         )
         logger.info("commanded gripper bin position....")
+
+    def open_gripper(self):
+        """Open the gripper fully."""
+        logger.info("Opening gripper")
+        self.piper.command_gripper(
+            position=self.GRIPPER_OPEN_POSITION,
+            effort=self.GRIPPER_DEFAULT_EFFORT,
+        )
+        logger.info("commanded gripper open....")
+
+    def close_gripper(self):
+        """Close the gripper fully."""
+        logger.info("Closing gripper")
+        self.piper.command_gripper(
+            position=self.GRIPPER_CLOSED_POSITION,
+            effort=self.GRIPPER_DEFAULT_EFFORT,
+        )
+        logger.info("commanded gripper close....")
+
+    def disable(
+        self,
+        settle_timeout: float = 10.0,
+        position_tolerance: float = 0.1,
+    ) -> None:
+        """Gracefully return the arm to zero and power down the motors.
+
+        Commands the arm to zero, polls joint positions until they are
+        within ``position_tolerance`` of zero (or ``settle_timeout``
+        elapses), then disables the gripper and the arm via the
+        ``piper_init`` blocking helpers.
+
+        WARNING: Disabling powers down the motors. The settle step exists
+        so that the arm is at its resting zero pose before it loses
+        power; if it cannot reach zero within the timeout, this method
+        still disables and the arm may drop from its last commanded pose.
+
+        Args:
+            settle_timeout: Max seconds to wait for the arm to reach zero
+                before disabling anyway.
+            position_tolerance: Per-joint radian tolerance for "at zero".
+        """
+        self.go_to_zero()
+
+        logger.info("Waiting for arm to settle at zero...")
+        deadline = time.monotonic() + settle_timeout
+        settled = False
+        while time.monotonic() < deadline:
+            positions = self.piper.get_joint_positions()
+            if all(abs(p) < position_tolerance for p in positions):
+                settled = True
+                break
+            time.sleep(0.1)
+
+        if not settled:
+            logger.warning(
+                "Arm did not settle at zero within %.1fs; disabling anyway.",
+                settle_timeout,
+            )
+
+        logger.info("Disabling gripper")
+        piper_init.disable_gripper(self.piper)
+        logger.info("Disabling arm")
+        piper_init.disable_arm(self.piper)
+        logger.info("Arm disabled")
 
     def go_to_bad_bin(self):
         """Go to the bad bin drop-off"""

@@ -75,6 +75,15 @@ def go_to_zero():
     piper_arm = PiperArm()
     piper_arm.go_to_zero()
 
+@arm_commands.command(name="go-to-ready")
+def go_to_ready():
+    """Go to the ready position"""
+    from printq.arm.piper import PiperArm
+
+    piper_arm = PiperArm()
+    piper_arm.go_to_zero()
+    piper_arm.go_to_ready()
+
 
 @arm_commands.command(name="calibrate")
 @click.option(

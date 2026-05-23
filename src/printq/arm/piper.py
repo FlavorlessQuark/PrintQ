@@ -2,7 +2,6 @@
 
 import time
 from logging import getLogger
-from typing import Tuple
 
 from piper_control import piper_init, piper_interface
 
@@ -11,6 +10,13 @@ logger = getLogger(__name__)
 
 class PiperArm:
     """Piper ARM control."""
+
+    JOINT_POSITIONS_READY = (0.04, 0.45, -1.5, 0.0, 1.0, 0.0)
+    # Gripper "ready" pose. Position is in meters (V2) or radians (V1);
+    # effort is in wrapper units where 1.0 corresponds to the SDK demo's
+    # default torque of 1000.
+    GRIPPER_READY_POSITION = 0.0
+    GRIPPER_READY_EFFORT = 1.0
 
     def __init__(self, can_port: str = "can0"):
         """Initialize the PiperArm."""
@@ -46,19 +52,26 @@ class PiperArm:
         """
         return self.piper.get_gripper_state()
 
-    def get_gripper_position(self) -> Tuple[int, int]:
-        """Get the gripper position.
-
-        Returns:
-            The gripper angle and force.
-        """
-        return self.piper.get_gripper_state()
-
     def go_to_zero(self):
         """Go to the zero position"""
         logger.info("Going to zero position")
         self.piper.command_joint_positions(positions=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0))
         logger.info("commanded zero position....")
+
+    def go_to_ready(self):
+        """Go to the ready position"""
+        logger.info("Going to ready position")
+        self.piper.command_joint_positions(positions=self.JOINT_POSITIONS_READY)
+        logger.info("commanded ready position....")
+
+        # move the gripper to the ready position
+        logger.info("Going to gripper ready position")
+        self.piper.command_gripper(
+            position=self.GRIPPER_READY_POSITION,
+            effort=self.GRIPPER_READY_EFFORT,
+        )
+        logger.info("commanded gripper ready position....")
+
 
     def calibrate_joints(self) -> None:
         """Calibrate every joint sequentially by setting its current pose as zero.

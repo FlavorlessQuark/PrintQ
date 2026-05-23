@@ -58,3 +58,11 @@ def status():
         )
 
     console.print(table)
+
+@arm_commands.command(name="go-to-zero")
+def go_to_zero():
+    """Go to the zero position"""
+    from printq.arm.piper import PiperArm
+
+    piper_arm = PiperArm()
+    piper_arm.go_to_zero()

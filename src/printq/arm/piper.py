@@ -34,3 +34,9 @@ class PiperArm:
             A tuple of joint positions.
         """
         return self.piper.get_joint_positions()
+
+    def go_to_zero(self):
+        """Go to the zero position"""
+        logger.info("Going to zero position")
+        self.piper.command_joint_positions(positions=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0))
+        logger.info("commanded zero position....")

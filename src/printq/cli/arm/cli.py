@@ -3,6 +3,7 @@
 from contextlib import contextmanager
 from logging import getLogger
 from typing import TYPE_CHECKING
+
 import click
 
 from printq.cli import console

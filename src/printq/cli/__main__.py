@@ -65,8 +65,10 @@ def register_commands(group: click.Group) -> None:
     """Register all commands under the given group."""
     from printq.cli.app import app_commands
     from printq.cli.arm import arm_commands
+    from printq.cli.camera import camera_commands
     group.add_command(arm_commands)
     group.add_command(app_commands)
+    group.add_command(camera_commands)
 
 
 register_commands(cli)

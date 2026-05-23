@@ -3,8 +3,6 @@
 from contextlib import contextmanager
 from logging import getLogger
 from typing import TYPE_CHECKING
-from ikpy.chain import Chain
-from ikpy.link import OriginLink, URDFLink
 import click
 
 from printq.cli import console
@@ -150,6 +148,15 @@ def go_to_scan():
     piper_arm.go_to_scan()
     _hold_until_interrupt(piper_arm)
 
+@arm_commands.command(name="move-ik")
+def move_ik():
+    """Move to a position using inverse kinematics"""
+    from printq.arm.piper import PiperArm
+
+    piper_arm = PiperArm()
+    piper_arm.move_ik()
+    _hold_until_interrupt(piper_arm)
+
 @arm_commands.command(name="go-to-good-bin")
 def go_to_good_bin():
     """Go to the good bin position"""
@@ -201,6 +208,7 @@ def control():
         ("bad bin", piper_arm.go_to_bad_bin),
         ("open gripper", piper_arm.open_gripper),
         ("close gripper", piper_arm.close_gripper),
+        ("move ik", piper_arm.move_ik),
     ]
 
     def _show_menu() -> None:

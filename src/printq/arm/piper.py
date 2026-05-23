@@ -1,6 +1,7 @@
 """Piper ARM control."""
 
 import time
+import numpy as np
 from ikpy.chain import chain
 from ikpy.link import OriginLink, URDFLink
 from logging import getLogger
@@ -52,11 +53,14 @@ class PiperArm:
         logger.info("PiperArm initialized")
         self.chain = chain.from_urdf_file("piper_description.urdf")
 
-    def move_ik(current, endpos):
+    def move_ik(self, end_off):
+        joints = np.array(self.get_joint_positions())
+        new_joints = joints.copy()
+        new_joints[:-1] += 2
         ik_solution = chain.inverse_kinematics(
-            target_position=target_position,
-            target_orientation=target_orientation,
-            initial_position=current
+            target_position=end_off,
+            target_orientation=self.piper.get_end_pose().orientation,
+            initial_position=joints
         )
         tolerance = 1e-5
             
@@ -69,7 +73,7 @@ class PiperArm:
             
             if joint_angle < (lower_limit - tolerance) or joint_angle > (upper_limit + tolerance):
                 print("Out of bounds")
-                
+        print("IK solution:", ik_solution)
         return ik_solution
 
 

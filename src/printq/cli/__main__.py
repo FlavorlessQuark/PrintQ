@@ -59,3 +59,15 @@ def cli(ctx, log_level):
     ctx.ensure_object(dict)
     ctx.obj["log_level"] = log_level
     setup_logging(log_level)
+
+
+def register_commands(group: click.Group) -> None:
+    """Register all commands under the given group."""
+    from printq.cli.arm import arm_commands
+    group.add_command(arm_commands)
+
+
+register_commands(cli)
+
+if __name__ == "__main__":
+    cli(obj={})

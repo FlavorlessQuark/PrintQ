@@ -44,20 +44,28 @@ def status():
 
     piper_arm = PiperArm()
     joint_positions = piper_arm.get_joint_positions()
+    gripper_angle, gripper_effort = piper_arm.get_gripper_state()
 
-    table = Table(title="ARM Joint Positions", title_style="bold cyan")
-    table.add_column("Joint", style="bold", justify="left")
-    table.add_column("Radians", justify="right")
-    table.add_column("Degrees", justify="right")
+    joints_table = Table(title="ARM Joint Positions", title_style="bold cyan")
+    joints_table.add_column("Joint", style="bold", justify="left")
+    joints_table.add_column("Radians", justify="right")
+    joints_table.add_column("Degrees", justify="right")
 
     for idx, position in enumerate(joint_positions, start=1):
-        table.add_row(
+        joints_table.add_row(
             f"J{idx}",
             f"{position:.4f}",
             f"{math.degrees(position):.2f}°",
         )
 
-    console.print(table)
+    gripper_table = Table(title="Gripper State", title_style="bold cyan")
+    gripper_table.add_column("Field", style="bold", justify="left")
+    gripper_table.add_column("Value", justify="right")
+    gripper_table.add_row("Angle", f"{gripper_angle:.4f}")
+    gripper_table.add_row("Effort", f"{gripper_effort:.4f}")
+
+    console.print(joints_table)
+    console.print(gripper_table)
 
 @arm_commands.command(name="go-to-zero")
 def go_to_zero():
@@ -66,3 +74,39 @@ def go_to_zero():
 
     piper_arm = PiperArm()
     piper_arm.go_to_zero()
+
+
+@arm_commands.command(name="calibrate")
+@click.option(
+    "--joints",
+    "joints",
+    is_flag=True,
+    default=False,
+    help="Calibrate all 6 arm joints sequentially.",
+)
+@click.option(
+    "--gripper",
+    "gripper",
+    is_flag=True,
+    default=False,
+    help="Calibrate the gripper zero position.",
+)
+def calibrate(joints: bool, gripper: bool):
+    """Calibrate the ARM joints or the gripper.
+
+    Exactly one of --joints or --gripper must be provided.
+    """
+    if joints and gripper:
+        raise click.UsageError(
+            "--joints and --gripper are mutually exclusive; specify only one."
+        )
+    if not joints and not gripper:
+        raise click.UsageError("Specify exactly one of --joints or --gripper.")
+
+    from printq.arm.piper import PiperArm
+
+    piper_arm = PiperArm()
+    if joints:
+        piper_arm.calibrate_joints()
+    else:
+        piper_arm.calibrate_gripper()

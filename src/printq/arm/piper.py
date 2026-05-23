@@ -27,8 +27,6 @@ class PiperArm:
     GRIPPER_READY_EFFORT = 1.0
     GRIPPER_PREGRASP_POSITION = 10.0
     GRIPPER_PREGRASP_EFFORT = 1.0
-    GRIPPER_BIN_POSITION = 10.0
-    GRIPPER_BIN_EFFORT = 1.0
     GRIPPER_OPEN_POSITION = 10.0
     GRIPPER_CLOSED_POSITION = 0.0
     GRIPPER_DEFAULT_EFFORT = 1.0
@@ -141,14 +139,6 @@ class PiperArm:
         self.piper.command_joint_positions(positions=self.JOINT_POSITIONS_GOOD_BIN)
         logger.info("commanded good bin position....")
 
-        # move the gripper to the good bin position
-        logger.info("Going to gripper bin position")
-        self.piper.command_gripper(
-            position=self.GRIPPER_BIN_POSITION,
-            effort=self.GRIPPER_BIN_EFFORT,
-        )
-        logger.info("commanded gripper bin position....")
-
     def open_gripper(self):
         """Open the gripper fully."""
         logger.info("Opening gripper")
@@ -219,13 +209,118 @@ class PiperArm:
         self.piper.command_joint_positions(positions=self.JOINT_POSITIONS_BAD_BIN)
         logger.info("commanded bad bin drop-off position....")
 
-        # move the gripper to the bad bin position
-        logger.info("Going to gripper bin position")
+    def go_to_joint_positions(self, positions, settle_time: float = 2.0):
+        """Move to custom joint positions (ik grasp pose)"""
+        positions = tuple(float(position) for position in positions)
+
+        if len(positions) != 6:
+            raise ValueError(f"Expected 6 joint positions, got {len(positions)}")
+
+        logger.info(f"Going to custom joint positions: {positions}")
+        self.piper.command_joint_positions(positions=positions)
+        time.sleep(settle_time)
+
+    def set_gripper(self, position: float, effort: float | None = None):
+        """Command the gripper to a specific position"""
+        if effort is None:
+            effort = self.GRIPPER_DEFAULT_EFFORT
+
+        min_position = self.GRIPPER_CLOSED_POSITION
+        max_position = self.GRIPPER_OPEN_POSITION
+
+        position = max(min_position, min(max_position, float(position)))
+
+        logger.info(f"Commanding gripper position: {position}")
         self.piper.command_gripper(
-            position=self.GRIPPER_BIN_POSITION,
-            effort=self.GRIPPER_BIN_EFFORT,
+            position=position,
+            effort=effort,
         )
-        logger.info("commanded gripper bin position....")
+
+    def run_print_cycle(
+        self,
+        get_ik_grasp_joints,
+        get_bambu_gripper_close_value,
+        get_vlm_decision,
+        move_settle_time: float = 2.0
+    ) -> str:
+        """Run the full PrintQ arm cycle.
+
+        Sequence:
+            1. Go to zero.
+            2. Go to ready.
+            3. Go to pre-grasp.
+            4. Use IK to move to grasp pose.
+            5. Use Bambu-derived value to close gripper.
+            6. Go to scan pose.
+            7. Use VLM decision.
+            8. Drop in good/bad bin.
+            9. Return to ready.
+
+        Callback expectations:
+            get_ik_grasp_joints() -> [j1, j2, j3, j4, j5, j6]
+            get_bambu_gripper_close_value() -> number from 0 to 10
+            get_vlm_decision() -> "good" or "bad"
+        """
+
+        logger.info("Starting full print cycle.")
+
+        logger.info("Step 1: Go to zero.")
+        self.go_to_zero()
+        time.sleep(move_settle_time)
+
+        logger.info("Step 2: Go to ready.")
+        self.go_to_ready()
+        time.sleep(move_settle_time)
+
+        logger.info("Step 3: Go to pre-grasp.")
+        self.go_to_pregrasp()
+        time.sleep(move_settle_time)
+
+        logger.info("Step 4: Get IK grasp pose.")
+        grasp_joints = get_ik_grasp_joints()
+
+        if grasp_joints is None:
+            raise RuntimeError("IK did not return a valid grasp pose.")
+
+        logger.info("Step 5: Move to IK grasp pose.")
+        self.go_to_joint_positions(grasp_joints, settle_time=move_settle_time)
+
+        logger.info("Step 6: Get Bambu gripper close amount.")
+        close_value = get_bambu_gripper_close_value()
+
+        logger.info(f"Step 7: Close gripper to .")
+        self.set_gripper(close_value)
+        time.sleep(1.0)
+
+        logger.info("Step 8: Move to scan pose.")
+        self.go_to_scan()
+        time.sleep(move_settle_time)
+
+        logger.info("Step 9: Get VLM quality decision.")
+        decision = str(get_vlm_decision()).strip().lower()
+
+        if decision not in ("good", "bad"):
+            raise RuntimeError(f"VLM returned invalid decision: {decision}")
+
+        if decision == "good":
+            logger.info("Step 10: Move to good bin.")
+            self.go_to_good_bin()
+        else:
+            logger.info("Step 10: Move to bad bin.")
+            self.go_to_bad_bin()
+
+        time.sleep(move_settle_time)
+
+        logger.info("Step 11: Release print.")
+        self.open_gripper()
+        time.sleep(1.0)
+
+        logger.info("Step 12: Return to ready.")
+        self.go_to_ready()
+        time.sleep(move_settle_time)
+
+        logger.info(f"Print cycle finished. Decision: {decision}")
+        return decision
 
     def calibrate_joints(self) -> None:
         """Calibrate every joint sequentially by setting its current pose as zero.

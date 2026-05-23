@@ -184,6 +184,29 @@ def go_to_pregrasp():
     piper_arm.go_to_pregrasp()
     _hold_until_interrupt(piper_arm)
 
+@arm_commands.command(name="set-gripper")
+@click.option(
+    "--position",
+    type=click.FloatRange(0.0, 10.0),
+    default=None,
+    help="Gripper position: 0.0=fully closed, 10.0=fully open",
+)
+def set_gripper_command(position: float | None):
+    """Set the gripper to a user-provided position from 0.0 to 10.0"""
+    from printq.arm.piper import PiperArm
+
+    piper_arm = PiperArm()
+
+    if position is None:
+        position = click.prompt(
+            "Gripper position? 0.0=fully closed, 10.0=fully open",
+            type=click.FloatRange(0.0, 10.0),
+            default=0.0,
+        )
+
+    piper_arm.set_gripper(position)
+    _hold_until_interrupt(piper_arm)
+
 @arm_commands.command(name="control")
 def control():
     """Interactively move the arm and gripper between presets until Ctrl-C.
@@ -198,6 +221,13 @@ def control():
     from printq.arm.piper import PiperArm
 
     piper_arm = PiperArm()
+    def _set_gripper_prompt() -> None:
+        gripper_position = click.prompt(
+            "Gripper position? 0.0=fully closed, 10.0=fully open",
+            type=click.FloatRange(0.0, 10.0),
+            default=0.0,
+        )
+        piper_arm.set_gripper(gripper_position)
 
     positions: list[tuple[str, "Callable[[], None]"]] = [
         ("zero", piper_arm.go_to_zero),
@@ -209,6 +239,7 @@ def control():
         ("open gripper", piper_arm.open_gripper),
         ("close gripper", piper_arm.close_gripper),
         ("move ik", piper_arm.move_ik),
+        ("set gripper position", _set_gripper_prompt),
     ]
 
     def _show_menu() -> None:
@@ -238,6 +269,56 @@ def control():
             logger.info(f"Moving to {label} position...")
             action()
 
+@arm_commands.command(name="run-print-cycle")
+def run_print_cycle():
+    """Run the full autonomous print pickup, scan, and sorting cycle."""
+    from printq.arm.piper import PiperArm
+
+    piper_arm = PiperArm()
+
+    def get_ik_grasp_joints():
+        """Replace this with actual IK output."""
+        import ik
+
+        # if ik.py has a function that returns the final grasp joints:
+        # return ik.get_grasp_joint_positions()
+
+        # temporary hardcoded target using your existing IK function:
+        target_position = [0.3, 0.1, 0.4]
+        return ik.solve_ik_for_target(target_position)
+
+    def get_bambu_gripper_close_value():
+        """Replace this with Bambu Lab print-derived gripping logic"""
+
+        # Temporary safe default. Tune this on the actual print.
+        return 5.0
+
+        # Later example:
+        # from printq.bambu import get_current_print_grip_value
+        # return get_current_print_grip_value()
+
+    def get_vlm_decision():
+        """Replace this with VLM quality-check result"""
+
+        # Temporary manual fallback for testing
+        decision = click.prompt(
+            "VLM decision? Type good or bad",
+            type=click.Choice(["good", "bad"], case_sensitive=False),
+        )
+        return decision
+
+        # Later example:
+        # from printq.vision.vlm import classify_current_print
+        # return classify_current_print()
+
+    with _disable_on_interrupt(piper_arm):
+        decision = piper_arm.run_print_cycle(
+            get_ik_grasp_joints=get_ik_grasp_joints,
+            get_bambu_gripper_close_value=get_bambu_gripper_close_value,
+            get_vlm_decision=get_vlm_decision,
+        )
+
+    console.print(f"Print cycle complete. Decision: {decision}")
 
 @arm_commands.command(name="calibrate")
 @click.option(

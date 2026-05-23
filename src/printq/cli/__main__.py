@@ -63,8 +63,10 @@ def cli(ctx, log_level):
 
 def register_commands(group: click.Group) -> None:
     """Register all commands under the given group."""
+    from printq.cli.app import app_commands
     from printq.cli.arm import arm_commands
     group.add_command(arm_commands)
+    group.add_command(app_commands)
 
 
 register_commands(cli)

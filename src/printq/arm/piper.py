@@ -1,11 +1,12 @@
 """Piper ARM control."""
 
 import time
-import numpy as np
-from ikpy.chain import chain
-from ikpy.link import OriginLink, URDFLink
+from importlib.resources import as_file, files
 from logging import getLogger
 
+import numpy as np
+from ikpy.chain import Chain
+from ikpy.link import OriginLink, URDFLink
 from piper_control import piper_init, piper_interface
 
 logger = getLogger(__name__)
@@ -49,30 +50,62 @@ class PiperArm:
         logger.info("Resetting the GRIPPER")
         piper_init.reset_gripper(self.piper)
         logger.info("PiperArm initialized")
-        self.chain = chain.from_urdf_file("piper_description.urdf")
+        self.chain = self._load_chain()
 
-    def move_ik(self, end_off):
-        joints = np.array(self.get_joint_positions())
-        new_joints = joints.copy()
-        new_joints[:-1] += 2
-        ik_solution = chain.inverse_kinematics(
+    @staticmethod
+    def _load_chain() -> Chain:
+        """Load the Piper kinematic chain from the packaged URDF.
+
+        Uses ``importlib.resources`` so the URDF resolves correctly whether
+        the package runs from the source tree or an installed wheel,
+        regardless of the current working directory.
+        """
+        urdf_resource = files("printq.assets").joinpath("piper_description.urdf")
+        with as_file(urdf_resource) as urdf_path:
+            return Chain.from_urdf_file(str(urdf_path))
+
+    def move_ik(self, end_off) -> tuple[float, ...]:
+        """Solve position-only IK to ``end_off`` and command the arm there.
+
+        Args:
+            end_off: Target end-effector position ``(x, y, z)`` in meters.
+
+        Returns:
+            The 6 joint values (radians) commanded to the arm.
+        """
+        robot_joints = np.asarray(self.get_joint_positions(), dtype=float)
+
+        # ikpy's initial_position must have one entry per chain link
+        # (including fixed links). The Piper URDF maps robot joints 1..6
+        # to chain link indices 1..6, sandwiched between a fixed base
+        # link and fixed gripper links, so we slot the robot's joints in
+        # there and leave the fixed slots at zero.
+        initial_position = np.zeros(len(self.chain.links))
+        initial_position[1:7] = robot_joints
+
+        ik_solution = self.chain.inverse_kinematics(
             target_position=end_off,
-            target_orientation=self.piper.get_end_pose().orientation,
-            initial_position=joints
+            initial_position=initial_position,
         )
+        target_joints = ik_solution[1:7]
+
         tolerance = 1e-5
-            
-        for i, link in enumerate(chain.links):
+        for link, joint_angle in zip(self.chain.links[1:7], target_joints):
             if link.bounds is None or len(link.bounds) != 2:
                 continue
-                
             lower_limit, upper_limit = link.bounds
-            joint_angle = ik_solution[i]
-            
-            if joint_angle < (lower_limit - tolerance) or joint_angle > (upper_limit + tolerance):
-                print("Out of bounds")
-        print("IK solution:", ik_solution)
-        return ik_solution
+            if (
+                joint_angle < lower_limit - tolerance
+                or joint_angle > upper_limit + tolerance
+            ):
+                logger.warning(
+                    "IK solution for %s out of bounds: %.4f not in [%.4f, %.4f]",
+                    link.name, joint_angle, lower_limit, upper_limit,
+                )
+
+        logger.info("IK solution joints: %s", target_joints)
+        self.go_to_joint_positions(target_joints)
+        return tuple(float(j) for j in target_joints)
 
 
 

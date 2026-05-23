@@ -3,12 +3,14 @@
 import cv2
 import numpy as np
 import pyrealsense2 as rs
+import open3d as o3d
 
 
 class RealsenseCamera:
     """Realsense camera wrapper."""
 
     WINDOW_NAME = "Realsense Camera"
+    PC = rs.pointcloud()
 
     def __init__(self):
         """Initialize the Realsense camera."""
@@ -58,6 +60,23 @@ class RealsenseCamera:
         if not depth_frame:
             return None
         return depth_frame
+    
+    def get_point_cloud(self):
+        depth_frame = self.get_depth_frame()
+        
+        if not depth_frame:
+            return None
+
+        points = self.PC.calculate(depth_frame)
+        
+        v = points.get_vertices()
+        verts = np.asanyarray(v).view(np.float32).reshape(-1, 3)
+        
+        verts = verts[~np.all(verts == 0, axis=1)]
+
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(verts)
+        return pcd
 
     def close(self):
         """Close the camera and any open OpenCV windows."""
@@ -67,7 +86,8 @@ class RealsenseCamera:
             # destroyAllWindows is idempotent: safe even if no window
             # was ever created (eg. if the first imshow crashed).
             cv2.destroyAllWindows()
-
+    def save_point_cloud(self):
+        o3d.io.write_point_cloud("p1.ply", self.get_point_cloud())
     def show_frame(self):
         """Display the latest color frame and depth colormap side-by-side."""
         color_frame, depth_frame = self.get_frames()

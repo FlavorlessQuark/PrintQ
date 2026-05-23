@@ -11,12 +11,21 @@ logger = getLogger(__name__)
 class PiperArm:
     """Piper ARM control."""
 
+    JOINT_POSITIONS_ZERO = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
     JOINT_POSITIONS_READY = (0.04, 0.45, -1.5, 0.0, 1.0, 0.0)
+    JOINT_POSITIONS_PREGRASP = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    JOINT_POSITIONS_SCAN = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    JOINT_POSITIONS_GOOD_BIN = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    JOINT_POSITIONS_BAD_BIN = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
     # Gripper "ready" pose. Position is in meters (V2) or radians (V1);
     # effort is in wrapper units where 1.0 corresponds to the SDK demo's
     # default torque of 1000.
     GRIPPER_READY_POSITION = 0.0
     GRIPPER_READY_EFFORT = 1.0
+    GRIPPER_PREGRASP_POSITION = 10.0
+    GRIPPER_PREGRASP_EFFORT = 1.0
+    GRIPPER_BIN_POSITION = 10.0
+    GRIPPER_BIN_EFFORT = 1.0
 
     def __init__(self, can_port: str = "can0"):
         """Initialize the PiperArm."""
@@ -55,7 +64,7 @@ class PiperArm:
     def go_to_zero(self):
         """Go to the zero position"""
         logger.info("Going to zero position")
-        self.piper.command_joint_positions(positions=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0))
+        self.piper.command_joint_positions(positions=self.JOINT_POSITIONS_ZERO)
         logger.info("commanded zero position....")
 
     def go_to_ready(self):
@@ -71,7 +80,54 @@ class PiperArm:
             effort=self.GRIPPER_READY_EFFORT,
         )
         logger.info("commanded gripper ready position....")
+    
+    def go_to_pregrasp(self):
+        """Go to the pre-grasp position"""
+        logger.info("Going to pre-grasp position")
+        self.piper.command_joint_positions(positions=self.JOINT_POSITIONS_PREGRASP)
+        logger.info("commanded pre-grasp position....")
 
+        # move the gripper to the scan position
+        logger.info("Going to gripper pre-grasp position")
+        self.piper.command_gripper(
+            position=self.GRIPPER_PREGRASP_POSITION,
+            effort=self.GRIPPER_PREGRASP_EFFORT,
+        )
+        logger.info("commanded gripper pre-grasp position....")
+
+    def go_to_scan(self):
+        """Go to the scan position"""
+        logger.info("Going to scan position")
+        self.piper.command_joint_positions(positions=self.JOINT_POSITIONS_SCAN)
+        logger.info("commanded scan position....")
+    
+    def go_to_good_bin(self):
+        """Go to the good bin"""
+        logger.info("Going to good bin position")
+        self.piper.command_joint_positions(positions=self.JOINT_POSITIONS_GOOD_BIN)
+        logger.info("commanded good bin position....")
+
+        # move the gripper to the good bin position
+        logger.info("Going to gripper bin position")
+        self.piper.command_gripper(
+            position=self.GRIPPER_BIN_POSITION,
+            effort=self.GRIPPER_BIN_EFFORT,
+        )
+        logger.info("commanded gripper bin position....")
+
+    def go_to_bad_bin(self):
+        """Go to the bad bin drop-off"""
+        logger.info("Going to bad bin drop-off position")
+        self.piper.command_joint_positions(positions=self.JOINT_POSITIONS_BAD_BIN)
+        logger.info("commanded bad bin drop-off position....")
+
+        # move the gripper to the bad bin position
+        logger.info("Going to gripper bin position")
+        self.piper.command_gripper(
+            position=self.GRIPPER_BIN_POSITION,
+            effort=self.GRIPPER_BIN_EFFORT,
+        )
+        logger.info("commanded gripper bin position....")
 
     def calibrate_joints(self) -> None:
         """Calibrate every joint sequentially by setting its current pose as zero.

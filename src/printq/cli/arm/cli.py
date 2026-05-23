@@ -149,13 +149,28 @@ def go_to_scan():
     piper_arm.go_to_scan()
     _hold_until_interrupt(piper_arm)
 
+def _prompt_ik_target() -> tuple[float, float, float]:
+    """Prompt the operator for an end-effector target (meters)."""
+    x = click.prompt("Target x (meters)", type=float, default=0.3)
+    y = click.prompt("Target y (meters)", type=float, default=0.0)
+    z = click.prompt("Target z (meters)", type=float, default=0.3)
+    return x, y, z
+
+
 @arm_commands.command(name="move-ik")
-def move_ik():
+@click.option("--x", type=float, default=None, help="Target x in meters.")
+@click.option("--y", type=float, default=None, help="Target y in meters.")
+@click.option("--z", type=float, default=None, help="Target z in meters.")
+def move_ik(x: float | None, y: float | None, z: float | None):
     """Move to a position using inverse kinematics"""
     from printq.arm.piper import PiperArm
 
     piper_arm = PiperArm()
-    piper_arm.move_ik()
+    if x is None or y is None or z is None:
+        target = _prompt_ik_target()
+    else:
+        target = (x, y, z)
+    piper_arm.move_ik(target)
     _hold_until_interrupt(piper_arm)
 
 @arm_commands.command(name="go-to-good-bin")
@@ -230,6 +245,9 @@ def control():
         )
         piper_arm.set_gripper(gripper_position)
 
+    def _move_ik_prompt() -> None:
+        piper_arm.move_ik(_prompt_ik_target())
+
     positions: list[tuple[str, "Callable[[], None]"]] = [
         ("zero", piper_arm.go_to_zero),
         ("ready", piper_arm.go_to_ready),
@@ -239,7 +257,7 @@ def control():
         ("bad bin", piper_arm.go_to_bad_bin),
         ("open gripper", piper_arm.open_gripper),
         ("close gripper", piper_arm.close_gripper),
-        ("move ik", piper_arm.move_ik),
+        ("move ik", _move_ik_prompt),
         ("set gripper position", _set_gripper_prompt),
     ]
 

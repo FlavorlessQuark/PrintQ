@@ -1,6 +1,8 @@
 import time
 import threading
-from piper_control import *
+from piper_control import piper_connect
+from piper_control import piper_interface
+from piper_control import piper_init
 
 CONTROL_FREQ_HZ = 50
 

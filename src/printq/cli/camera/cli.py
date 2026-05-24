@@ -12,15 +12,15 @@ The Realsense camera follows the same client/server split as the arm:
 """
 
 import contextlib
+import threading
 import time
 from logging import getLogger
-import threading
 
 import click
 import redis
-from printq.camera.qwen import Qwen
-import threading
 from rich.console import Console
+
+from printq.camera.qwen import Qwen
 from printq.camera.realsense import CameraNotRunningError, RealsenseCamera
 
 logger = getLogger(__name__)
@@ -47,10 +47,12 @@ def start_loop():
 @camera_commands.command(name="start")
 def start():
     """Start the camera and stream the depth feed until 'q' is pressed."""
-    import cv2
     import base64
-    import numpy as np
     import json
+
+    import cv2
+    import numpy as np
+
     from printq.camera.realsense import RealsenseCamera
 
     camera = RealsenseCamera()
@@ -106,7 +108,7 @@ def _handle_camera_not_running():
 
 # ---------------------------------------------------------------- server
 
-@camera_commands.command(name="start")
+@camera_commands.command(name="start-server")
 @click.option(
     "--serial",
     type=str,
@@ -147,7 +149,7 @@ def _handle_camera_not_running():
         "(e.g. wait_for_frames keeps timing out). Adds ~3s to startup."
     ),
 )
-def start(
+def start_server(
     serial: str | None,
     width: int,
     height: int,

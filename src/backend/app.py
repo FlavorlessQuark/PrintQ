@@ -44,8 +44,6 @@ def health_check():
 if __name__ == '__main__':
     debug_mode = os.getenv('FLASK_DEBUG', 'True') == 'True'
     port = int(os.getenv('FLASK_PORT', 5000))
-    pubsub = r.pubsub()
-    pubsub.subscribe('status')
     threading.Thread(target=send_status, daemon=True).start()
 
     print("\n" + "="*60)

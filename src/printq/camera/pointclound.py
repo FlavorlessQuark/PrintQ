@@ -1,3 +1,5 @@
+import copy
+
 import open3d as o3d
 import numpy as np
 import trimesh
@@ -102,3 +104,20 @@ class PointCloud:
         print("\n--- LIKENESS ESTIMATION RESULTS ---")
         print(f"Alignment Fitness Score: {reg_p2p.fitness:.4f} (Closer to 1.0 is a better match)")
         print(f"Surface Deviation (RMSE): {reg_p2p.inlier_rmse:.6f} meters")
+
+    def visualize(cam1, cam2):
+        pcd1 = cam1.get_point_cloud()
+        pcd2 = cam2.get_point_cloud()
+        vis_pcd1 = pcd1.clone() if hasattr(pcd1, 'clone') else copy.deepcopy(pcd1)
+        vis_pcd2 = pcd2.clone() if hasattr(pcd2, 'clone') else copy.deepcopy(pcd2)
+
+        vis_pcd1.paint_uniform_color([0, 0.651, 0.929]) 
+        vis_pcd2.paint_uniform_color([1, 0.706, 0])      
+
+        origin_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1, origin=[0, 0, 0])
+
+        o3d.visualization.draw_geometries(
+            [vis_pcd1, vis_pcd2, origin_frame], 
+            window_name="Camera Alignment Debugger (Close window to continue)",
+            width=1024, height=768
+        )

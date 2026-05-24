@@ -63,4 +63,35 @@ def calibrate():
     pointcloud = PointCloud()
     pointcloud.load_3mf_as_pointcloud("./src/printq/assets/xyz.3mf")
     print(pointcloud.compare_pointclouds(pointcloud.current_pcd["pcd"]))
+
+@camera_commands.command(name="ask")
+def ask_qwen():
+    import os
+    from openai import OpenAI
+    from printq.camera.realsense import RealsenseCamera
+    KEY = "sk-5a54c58071af4e7781b714772fc7a233"
+    
+    camera = RealsenseCamera()
+    img_data = camera.take_pic()
+
+    client = OpenAI(
+        api_key=KEY,
+        base_url=("https://dashscope-intl.alyunc.com/compatible-mode/v1")
+    )
+    completion = client.chat.completions.create(
+        model="qwen3.6-plus",
+        messages=[
+            {"role": "user", 
+             "content": [
+                 {
+                    "type": "text", 
+                    "text": "This is a 3d printed object. Describe the quality of the print in a short sentence blsusb"
+                }, {
+                    "type": "image_url", 
+                    "image_url": {
+                        "url": f"data:image/jpeg;base64,{img_data}"
+                    }
+                }
+             ]}])
+    print(completion.choices[0].message.content)
     

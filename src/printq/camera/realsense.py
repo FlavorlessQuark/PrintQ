@@ -4,7 +4,7 @@ import cv2
 import numpy as np
 import pyrealsense2 as rs
 import open3d as o3d
-
+import base64
 
 class RealsenseCamera:
     """Realsense camera wrapper."""
@@ -127,5 +127,31 @@ class RealsenseCamera:
         serial_number = specific_camera.get_info(rs.camera_info.serial_number)
         camera_name = specific_camera.get_info(rs.camera_info.name)
         print(f"Found RealSense camera: {camera_name} (Serial: {serial_number})")
+
+    import numpy as np
+    def take_pic(self):
+
+
+        try:
+            frames = self.pipeline.wait_for_frames()
+            color_frame = frames.get_color_frame()
+            
+            if not color_frame:
+                return None
+            
+            # 3. Convert image to numpy array
+            color_image = np.asanyarray(color_frame.get_data())
+            
+            # 4. Encode to JPEG format (in memory)
+            # We use JPEG because raw RGB is massive; JPEG makes the base64 string smaller
+            success, encoded_img = cv2.imencode('.jpg', color_image)
+            
+            if success:
+                # 5. Convert to Base64
+                b64_string = base64.b64encode(encoded_img).decode('utf-8')
+                return b64_string
+                
+        finally:
+            self.pipeline.stop()
 
     

@@ -149,7 +149,12 @@ class GripperCommandPayload(ctypes.Structure):
 
 
 class GripperStatePayload(ctypes.Structure):
-    """Iceoryx2 payload published every cycle with gripper state."""
+    """Iceoryx2 payload published every cycle with gripper state.
+
+    ``angle`` is in wrapper units (``0..GRIPPER_OPEN_POSITION``) so it
+    matches the scale used for commands. ``effort`` is in N·m (passed
+    through unchanged from the SDK).
+    """
 
     _fields_ = [
         ("timestamp_ns", ctypes.c_uint64),
@@ -298,6 +303,21 @@ def _run_control_loop(
     joint_limits = piper.joint_limits
     joint_min = tuple(joint_limits["min"][:6])
     joint_max = tuple(joint_limits["max"][:6])
+
+    # The Piper SDK's ``command_gripper(position=...)`` expects meters
+    # (clipped to ``[0, gripper_angle_max]``, typically 0.07 m), and
+    # ``get_gripper_state()`` reports the angle in meters as well. We
+    # expose a friendlier 0..``GRIPPER_OPEN_POSITION`` scale to clients
+    # (see :class:`PiperArm`), so the loop owns the unit conversion at
+    # the SDK boundary in both directions.
+    gripper_angle_max = float(piper.gripper_angle_max)
+    gripper_position_scale = gripper_angle_max / PiperArm.GRIPPER_OPEN_POSITION
+    child_logger.info(
+        "Gripper position scale: 1 wrapper unit = %.6f m (max=%.6f m at wrapper=%.1f).",
+        gripper_position_scale,
+        gripper_angle_max,
+        PiperArm.GRIPPER_OPEN_POSITION,
+    )
 
     node = iox2.NodeBuilder.new().create(iox2.ServiceType.Ipc)
 
@@ -496,10 +516,17 @@ def _run_control_loop(
             except Exception as exc:  # noqa: BLE001
                 child_logger.exception("Failed to read joint positions: %s", exc)
             try:
-                gripper_angle, gripper_effort = piper.get_gripper_state()
+                raw_angle_m, gripper_effort = piper.get_gripper_state()
             except Exception as exc:  # noqa: BLE001
                 child_logger.exception("Failed to read gripper state: %s", exc)
-                gripper_angle, gripper_effort = 0.0, 0.0
+                raw_angle_m, gripper_effort = 0.0, 0.0
+            # Convert SDK meters → wrapper units (0..GRIPPER_OPEN_POSITION)
+            # so subscribers see the same scale used for commands.
+            gripper_angle = (
+                raw_angle_m / gripper_position_scale
+                if gripper_position_scale > 0.0
+                else 0.0
+            )
 
             # 5. Mode selection.
             now_ns = time.time_ns()
@@ -543,12 +570,18 @@ def _run_control_loop(
                 and last_gripper_cmd is not None
                 and last_gripper_cmd != last_gripper_sent
             ):
+                wrapper_pos, wrapper_effort = last_gripper_cmd
+                sdk_pos_m = wrapper_pos * gripper_position_scale
                 try:
                     piper.command_gripper(
-                        position=last_gripper_cmd[0],
-                        effort=last_gripper_cmd[1],
+                        position=sdk_pos_m,
+                        effort=wrapper_effort,
                     )
                     last_gripper_sent = last_gripper_cmd
+                    child_logger.debug(
+                        "Gripper SDK command: wrapper=%.3f → %.6f m, effort=%.3f.",
+                        wrapper_pos, sdk_pos_m, wrapper_effort,
+                    )
                 except Exception as exc:  # noqa: BLE001
                     flags |= ControlFlags.CAN_ERROR
                     child_logger.exception("Gripper CAN command failed: %s", exc)
@@ -622,20 +655,21 @@ class PiperArm:
     """Piper ARM control."""
 
     JOINT_POSITIONS_ZERO = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-    JOINT_POSITIONS_READY = (0.04, 0.45, -1.5, 0.0, 1.0, 0.0)
-    # JOINT_POSITIONS_PREGRASP = (0.02, 1.87, -0.53, 0.04, -1.24, 0.08)
-    JOINT_POSITIONS_PREGRASP = (-0.0418, 1.7753, -1.3291, -0.0102, -0.1861, 0.0228)
+    # JOINT_POSITIONS_READY = (0.04, 0.45, -1.5, 0.0, 1.0, 0.0)
+    JOINT_POSITIONS_READY = (0.0039, -0.0030, -0.4229, 0.0383, 0.5101, 0.0145)
+    # JOINT_POSITIONS_PREGRASP = (0.02, 1.87, -0.53, 0.04, -1.24, 0.08) # original
+    # JOINT_POSITIONS_PREGRASP = (-0.0418, 1.7753, -1.3291, -0.0102, -0.1861, 0.0228) # last night
+    JOINT_POSITIONS_PREGRASP = (-0.1283, 1.6746, -0.7168, -0.0809, -0.8140, 0.0397) # today morning 
     JOINT_POSITIONS_GRASP = (-0.0705, 2.6633, -2.1799, -0.1648, -0.1409, 0.1268)
     JOINT_POSITIONS_SCAN = (1.23, -0.01, -0.52, -0.01, 0.58, 0.01)
-    JOINT_POSITIONS_GOOD_BIN = (-0.46, 1.84, -0.72, 0.02, -0.69, 0.02)
+    # JOINT_POSITIONS_GOOD_BIN = (-0.46, 1.84, -0.72, 0.02, -0.69, 0.02)
+    JOINT_POSITIONS_GOOD_BIN = (-0.6574, 1.5, -0.4441, 0.1783, -0.7182, 0.0219)
     JOINT_POSITIONS_BAD_BIN = (0.63, 1.84, -0.73, 0.02, -0.69, 0.02)
-    # Gripper "ready" pose. Position is in meters (V2) or radians (V1);
+    # Gripper position bounds. Position is in meters (V2) or radians (V1);
     # effort is in wrapper units where 1.0 corresponds to the SDK demo's
-    # default torque of 1000.
-    GRIPPER_READY_POSITION = 0.0
-    GRIPPER_READY_EFFORT = 1.0
-    GRIPPER_PREGRASP_POSITION = 10.0
-    GRIPPER_PREGRASP_EFFORT = 1.0
+    # default torque of 1000. The ``go_to_*`` preset moves deliberately
+    # leave the gripper alone — it changes only on an explicit gripper
+    # command (e.g. ``open_gripper`` / ``close_gripper`` / ``set_gripper``).
     GRIPPER_OPEN_POSITION = 10.0
     GRIPPER_CLOSED_POSITION = 0.0
     GRIPPER_DEFAULT_EFFORT = 1.0
@@ -1364,7 +1398,12 @@ class PiperArm:
         self,
         timeout: float | None = None,
     ) -> tuple[float, float]:
-        """Return the latest ``(angle, effort)`` from the gripper-state service."""
+        """Return the latest ``(angle, effort)`` from the gripper-state service.
+
+        ``angle`` is in wrapper units (``0..GRIPPER_OPEN_POSITION``), so it
+        is directly comparable to the values accepted by :meth:`set_gripper`.
+        ``effort`` is in N·m as reported by the SDK.
+        """
         if timeout is None:
             timeout = self.DEFAULT_READ_TIMEOUT_S
 
@@ -1410,28 +1449,18 @@ class PiperArm:
         self._log_arrival("zero", arrived, settle_time)
 
     def go_to_ready(self, settle_time: float | None = None) -> None:
-        """Command the arm + gripper to the ready pose."""
+        """Command the arm to the ready pose (gripper stays at its current state)."""
         if settle_time is None:
             settle_time = self.DEFAULT_GO_TO_SETTLE_TIME_S
         logger.info("Going to ready position (timeout=%.1fs)", settle_time)
-        # Gripper is edge-triggered in the control loop (only re-sent when
-        # the setpoint changes), so a single publish is enough.
-        self.send_gripper_command(
-            position=self.GRIPPER_READY_POSITION,
-            effort=self.GRIPPER_READY_EFFORT,
-        )
         arrived = self.stream_command(self.JOINT_POSITIONS_READY, duration=settle_time)
         self._log_arrival("ready", arrived, settle_time)
 
     def go_to_pregrasp(self, settle_time: float | None = None) -> None:
-        """Command the arm + gripper to the pre-grasp pose."""
+        """Command the arm to the pre-grasp pose (gripper stays at its current state)."""
         if settle_time is None:
             settle_time = self.DEFAULT_GO_TO_SETTLE_TIME_S
         logger.info("Going to pre-grasp position (timeout=%.1fs)", settle_time)
-        self.send_gripper_command(
-            position=self.GRIPPER_PREGRASP_POSITION,
-            effort=self.GRIPPER_PREGRASP_EFFORT,
-        )
         arrived = self.stream_command(
             self.JOINT_POSITIONS_PREGRASP, duration=settle_time,
         )

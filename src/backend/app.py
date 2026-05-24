@@ -35,6 +35,9 @@ def send_status():
                 data = json.loads(message['data'])
                 print(data["success"])
                 socketio.emit('status_update', message['data'])
+                # success : true / false
+                # desc:string
+                # image: base64 encoded image
 
 @app.route('/api/health', methods=['GET'])
 def health_check():
@@ -54,5 +57,5 @@ if __name__ == '__main__':
     print(f"📊 Current data endpoint: GET /api/current")
     print("="*60 + "\n")
 
-    socketio.run(app, host='0.0.0.0', port=port, debug=True)
+    socketio.run(app, host='0.0.0.0', port=port, debug=True, allow_unsafe_werkzeug=True)
 

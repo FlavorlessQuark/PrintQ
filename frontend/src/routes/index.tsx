@@ -59,9 +59,10 @@ function Index() {
 
     // Socket.IO
     const socket = io(BACKEND_URL, {
-      transports: ["websocket", "polling"],
-      reconnectionAttempts: 3,
-      timeout: 4000,
+      reconnection: true,
+      reconnectionDelay: 1000,
+      reconnectionDelayMax: 5000,
+      reconnectionAttempts: 5,
     });
     socketRef.current = socket;
 

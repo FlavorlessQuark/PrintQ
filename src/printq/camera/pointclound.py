@@ -260,4 +260,4 @@ class PointCloud:
         likeness_percentage = icp_result.fitness * 100 
         
         # Return the transformation matrix (position relative to camera) and the likeness
-        return icp_result.transformation, likeness_percentage
+        return likeness_percentage

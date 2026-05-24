@@ -19,7 +19,7 @@ load_dotenv()
 app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*")
 r = redis.Redis(host='localhost', port=6379, decode_responses=True)
-CORS(app)
+CORS(app, resources={r"/api/*": {"origins": "*"}})
 
 TIME_BASE = 60  # 60 minutes
 register_socketio_events(socketio)

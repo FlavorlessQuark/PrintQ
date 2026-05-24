@@ -1,10 +1,11 @@
 import copy
-
+import time
+import pyrealsense2 as rs
 import open3d as o3d
 import numpy as np
 import trimesh
 
-import RealsenseCamera
+from .realsense import RealsenseCamera
 
 CAM1SERIAL = "139522074081"
 CAM2SERIAL = "146322072402"
@@ -105,7 +106,7 @@ class PointCloud:
         print(f"Alignment Fitness Score: {reg_p2p.fitness:.4f} (Closer to 1.0 is a better match)")
         print(f"Surface Deviation (RMSE): {reg_p2p.inlier_rmse:.6f} meters")
 
-    def visualize(cam1, cam2):
+    def visualize(self, cam1, cam2):
         pcd1 = cam1.get_point_cloud()
         pcd2 = cam2.get_point_cloud()
         vis_pcd1 = pcd1.clone() if hasattr(pcd1, 'clone') else copy.deepcopy(pcd1)
@@ -121,3 +122,110 @@ class PointCloud:
             window_name="Camera Alignment Debugger (Close window to continue)",
             width=1024, height=768
         )
+    
+
+    def capture_pointcloud(self, serial, color):
+        """Initializes a RealSense camera, captures a frame, and returns an Open3D point cloud."""
+        print(f"Connecting to Camera {serial}...")
+        pipeline = rs.pipeline()
+        config = rs.config()
+        config.enable_device(serial)
+        config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
+        
+        pipeline.start(config)
+        
+        # Let auto-exposure settle
+        time.sleep(2)
+        
+        # Capture multiple frames and take the last one for a stable image
+        for _ in range(10):
+            frames = pipeline.wait_for_frames()
+            
+        depth_frame = frames.get_depth_frame()
+        
+        # Generate point cloud
+        pc = rs.pointcloud()
+        points = pc.calculate(depth_frame)
+        
+        # Convert to Open3D format
+        v = points.get_vertices()
+        verts = np.asanyarray(v).view(np.float32).reshape(-1, 3)
+        
+        # Filter out zero-depth points
+        verts = verts[~np.all(verts == 0, axis=1)]
+        
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(verts)
+        
+        # Downsample slightly for easier processing
+        pcd = pcd.voxel_down_sample(voxel_size=0.005)
+        pcd.paint_uniform_color(color)
+        
+        pipeline.stop()
+        print(f"Captured {len(pcd.points)} points from Camera {serial}.")
+        return pcd
+
+    def pick_points(self, pcd, window_name="Pick Points"):
+        """Opens Open3D visualizer to pick points manually."""
+        print(f"\n--- INSTRUCTIONS FOR: {window_name} ---")
+        print("1) Hold [Shift] + [Left Click] to select a point.")
+        print("2) Select 3 or 4 distinct features on the calibration object.")
+        print("3) Close the window when finished.")
+        
+        vis = o3d.visualization.VisualizerWithEditing()
+        vis.create_window(window_name=window_name, width=1280, height=720)
+        vis.add_geometry(pcd)
+        vis.run() 
+        vis.destroy_window()
+        
+        return vis.get_picked_points()
+
+    def calibrate(self):
+        print("=== MULTI-CAMERA EXTRINSIC CALIBRATION ===")
+        print("Place an asymmetric object (like a box with markings) where BOTH cameras can see it.")
+        input("Press [ENTER] to capture 3D frames...")
+
+        # Capture clouds (Cam 1 = Blue, Cam 2 = Yellow)
+        pcd1 = self.capture_pointcloud(CAM1SERIAL, [0, 0.651, 0.929])
+        pcd2 = self.capture_pointcloud(CAM2SERIAL, [1, 0.706, 0])
+
+        print("\nSTEP 1: Pick points on Camera 1 (Base)")
+        indices1 = self.pick_points(pcd1, "Camera 1 (Base) - Pick 3+ points")
+
+        print("\nSTEP 2: Pick points on Camera 2 (Target)")
+        print("WARNING: You must click the exact same physical corners in the EXACT SAME ORDER.")
+        indices2 = self.pick_points(pcd2, "Camera 2 (Target) - Pick the same points")
+
+        if len(indices1) < 3 or len(indices1) != len(indices2):
+            print("\n❌ Error: You must pick at least 3 points, and the number of points must match.")
+            return
+
+        # Map the points
+        corr = np.zeros((len(indices2), 2))
+        corr[:, 0] = indices2
+        corr[:, 1] = indices1
+        corres_pairs = o3d.utility.Vector2iVector(corr)
+
+        # Compute transformation matrix
+        print("\nCalculating 4x4 Transformation Matrix...")
+        estimator = o3d.pipelines.registration.TransformationEstimationPointToPoint()
+        matrix = estimator.compute_transformation(pcd2, pcd1, corres_pairs)
+
+        print("\n==========================================")
+        print("✅ SUCCESS! COPY THIS INTO YOUR MAIN SCRIPT:")
+        print("==========================================")
+        print("TRANSFORM_CAM2_TO_GLOBAL = np.array([")
+        for row in matrix:
+            print(f"    [{row[0]: 10.6f}, {row[1]: 10.6f}, {row[2]: 10.6f}, {row[3]: 10.6f}],")
+        print("])")
+        print("==========================================\n")
+
+        # Visualize the aligned result
+        print("Visualizing alignment. The Blue and Yellow objects should overlap perfectly.")
+        pcd2_aligned = copy.deepcopy(pcd2)
+        pcd2_aligned.transform(matrix)
+        
+        # Create coordinate frame at origin
+        origin = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1, origin=[0, 0, 0])
+        
+        o3d.visualization.draw_geometries([pcd1, pcd2_aligned, origin], window_name="Final Alignment Verification")

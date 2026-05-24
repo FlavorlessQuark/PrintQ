@@ -38,3 +38,11 @@ def serial():
     camera = RealsenseCamera()
 
     camera.get_serial()
+
+
+
+@camera_commands.command(name="calibrate")
+def calibrate():
+    from printq.camera.pointclound import PointCloud
+    pointcloud = PointCloud()
+    pointcloud.calibrate()

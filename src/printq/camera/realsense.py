@@ -114,3 +114,16 @@ class RealsenseCamera:
         # to the same resolution by default on D4xx-series cameras.
         combined = np.hstack((color_image, depth_colormap))
         cv2.imshow(self.WINDOW_NAME, combined)
+
+    def get_serial(self):
+        context = rs.context()
+        devices = context.query_devices()
+
+        if len(devices) == 0:
+            raise RuntimeError("System sees zero RealSense devices. Unplug and replug the camera.")
+
+        # 2. Grab the specific serial number of the first camera found
+        specific_camera = devices[0]
+        serial_number = specific_camera.get_info(rs.camera_info.serial_number)
+        camera_name = specific_camera.get_info(rs.camera_info.name)
+        print(f"Found RealSense camera: {camera_name} (Serial: {serial_number})")

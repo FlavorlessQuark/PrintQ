@@ -4,8 +4,8 @@ import trimesh
 
 import RealsenseCamera
 
-CAM1SERIAL = "000000000001"
-CAM2SERIAL = "000000000002"
+CAM1SERIAL = "139522074081"
+CAM2SERIAL = "146322072402"
 
 # TRANSFORM_CAM1_TO_GLOBAL = np.array([
 #     [24.0, 0.0, 0.0,  0.0],

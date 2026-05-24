@@ -29,3 +29,12 @@ def start():
                 break
     finally:
         camera.close()
+
+@camera_commands.command(name="serial")
+def serial():
+
+    from printq.camera.realsense import RealsenseCamera
+
+    camera = RealsenseCamera()
+
+    camera.get_serial()

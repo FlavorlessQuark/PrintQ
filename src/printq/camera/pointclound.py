@@ -229,3 +229,35 @@ class PointCloud:
         origin = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1, origin=[0, 0, 0])
         
         o3d.visualization.draw_geometries([pcd1, pcd2_aligned, origin], window_name="Final Alignment Verification")
+
+
+    def compare_pointclouds(self, pcd):
+        # 1. Downsample and extract features from the live RealSense point cloud
+        voxel_size = 0.01 # 1cm voxels for speed
+        live_down = pcd.voxel_down_sample(voxel_size)
+        live_down.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size*2, max_nn=30))
+        
+        live_features = o3d.pipelines.registration.compute_fpfh_feature(
+        live_down, o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size*5, max_nn=100))
+
+        # 2. Global Registration: Figure out rough orientation (Which side are we facing?)
+        result_ransac = o3d.pipelines.registration.registration_ransac_based_on_feature_matching(
+            live_down, self.current_pcd["pcd"], live_features, self.current_pcd["features"], True,
+            max_correspondence_distance=voxel_size*1.5,
+            estimation_method=o3d.pipelines.registration.TransformationEstimationPointToPoint(False),
+            ransac_n=3,
+            checkers=[o3d.pipelines.registration.CorrespondenceCheckerBasedOnEdgeLength(0.9),
+                    o3d.pipelines.registration.CorrespondenceCheckerBasedOnDistance(voxel_size*1.5)],
+            criteria=o3d.pipelines.registration.RANSACConvergenceCriteria(100000, 0.999))
+
+        # 3. Local Registration: Tightly snap the live points to the CAD model
+        icp_result = o3d.pipelines.registration.registration_icp(
+            pcd, self.current_pcd["pcd"], max_correspondence_distance=0.02, # 2cm tolerance
+            init=result_ransac.transformation,
+            estimation_method=o3d.pipelines.registration.TransformationEstimationPointToPlane())
+
+        # fitness represents the overlapping area (% likeness)
+        likeness_percentage = icp_result.fitness * 100 
+        
+        # Return the transformation matrix (position relative to camera) and the likeness
+        return icp_result.transformation, likeness_percentage

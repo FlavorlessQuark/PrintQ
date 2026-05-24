@@ -127,3 +127,5 @@ class RealsenseCamera:
         serial_number = specific_camera.get_info(rs.camera_info.serial_number)
         camera_name = specific_camera.get_info(rs.camera_info.name)
         print(f"Found RealSense camera: {camera_name} (Serial: {serial_number})")
+
+    

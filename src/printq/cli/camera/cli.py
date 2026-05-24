@@ -46,3 +46,21 @@ def calibrate():
     from printq.camera.pointclound import PointCloud
     pointcloud = PointCloud()
     pointcloud.calibrate()
+
+@camera_commands.command(name="cmp_cam")
+def calibrate():
+    from printq.camera.pointclound import PointCloud
+    from printq.camera.realsense import RealsenseCamera
+    pointcloud = PointCloud()
+
+    cam = RealsenseCamera()
+    pointcloud.load_3mf_as_pointcloud("./src/printq/assets/xyz.3mf")
+    print(pointcloud.compare_pointclouds(cam.get_point_cloud() ))
+
+@camera_commands.command(name="cmp_self")
+def calibrate():
+    from printq.camera.pointclound import PointCloud
+    pointcloud = PointCloud()
+    pointcloud.load_3mf_as_pointcloud("./src/printq/assets/xyz.3mf")
+    print(pointcloud.compare_pointclouds(pointcloud.current_pcd["pcd"]))
+    

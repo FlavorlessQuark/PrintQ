@@ -21,6 +21,7 @@ detected.
 
 from contextlib import contextmanager
 from logging import getLogger
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import click
@@ -316,6 +317,14 @@ def go_to_pregrasp():
         arm.go_to_pregrasp()
 
 
+@arm_commands.command(name="go-to-grasp-position")
+def go_to_grasp_position():
+    """Command the arm to the grasp pose."""
+    arm = _new_client()
+    with _handle_arm_not_running():
+        arm.go_to_grasp()
+
+
 @arm_commands.command(name="go-to-scan")
 def go_to_scan():
     """Command the arm to the scan pose."""
@@ -479,6 +488,7 @@ def control():
         ("4", "scan", arm.go_to_scan),
         ("5", "good bin", arm.go_to_good_bin),
         ("6", "bad bin", arm.go_to_bad_bin),
+        ("7", "grasp position", arm.go_to_grasp),
         ("o", "open gripper", arm.open_gripper),
         ("c", "close gripper", arm.close_gripper),
         ("i", "move ik", _move_ik_prompt),
@@ -607,3 +617,178 @@ def calibrate(can_port: str, joints: bool, gripper: bool):
     except RuntimeError as exc:
         console.print(f"[bold red]{exc}[/bold red]")
         raise click.exceptions.Exit(code=1) from exc
+
+
+@arm_commands.command(name="hand-eye-calibration")
+@click.option(
+    "--points-file",
+    "points_file",
+    type=click.Path(exists=True, dir_okay=False, readable=True, path_type=Path),
+    required=True,
+    help="JSON file mapping point names (e.g. 'P1') to 6-element joint lists in radians.",
+)
+@click.option(
+    "--output-dir",
+    "output_dir",
+    type=click.Path(file_okay=False, writable=True, path_type=Path),
+    required=True,
+    help="Directory to write the captured end-effector poses and camera frames.",
+)
+@click.option(
+    "--settle-time",
+    type=click.FloatRange(0.5, 60.0),
+    default=8.0,
+    show_default=True,
+    help="Max seconds to wait for the arm to reach each commanded pose.",
+)
+@click.option(
+    "--dwell",
+    type=click.FloatRange(0.0, 30.0),
+    default=1.0,
+    show_default=True,
+    help="Extra seconds to hold the pose after arrival before capturing.",
+)
+def hand_eye_calibration(
+    points_file: Path,
+    output_dir: Path,
+    settle_time: float,
+    dwell: float,
+):
+    """Sweep a list of joint poses, capturing end-effector pose + camera frame.
+
+    Reads ``points_file`` (a JSON object mapping point names to 6-element
+    joint position lists in radians, like ``points.json``) and, for each
+    entry:
+
+      1. Commands the arm to those joint targets.
+      2. Waits up to ``--settle-time`` for the arm to arrive, plus an
+         optional ``--dwell`` to let the structure stop ringing.
+      3. Records the achieved joint positions, the resulting 4x4
+         end-effector pose (forward kinematics on the measured joints),
+         and the latest color frame from the camera publisher.
+
+    Both the arm control loop (``printq arm start``) and the camera
+    publisher (``printq camera start``) must be running. The output
+    directory will contain ``manifest.json`` plus an ``images/`` folder
+    with one PNG per point.
+    """
+    import json
+    import time
+
+    import cv2
+    import numpy as np
+
+    from printq.camera.realsense import CameraNotRunningError, RealsenseCamera
+
+    output_dir = Path(output_dir)
+    images_dir = output_dir / "images"
+    images_dir.mkdir(parents=True, exist_ok=True)
+
+    with open(points_file) as f:
+        raw_points = json.load(f)
+    if not isinstance(raw_points, dict) or not raw_points:
+        raise click.UsageError(
+            f"{points_file} must contain a non-empty JSON object mapping "
+            "point names to 6-element joint lists."
+        )
+
+    arm = _new_client()
+    camera = RealsenseCamera()
+
+    # Verify both services are alive up front so we fail fast with a
+    # clear message rather than partway through the sweep.
+    with _handle_arm_not_running():
+        arm.get_heartbeat()
+    try:
+        camera.get_heartbeat()
+    except CameraNotRunningError as exc:
+        console.print(f"[bold red]{exc}[/bold red]")
+        raise click.exceptions.Exit(code=1) from exc
+
+    # Forward kinematics needs the URDF chain. Use the arm's loader so
+    # we share the same packaged URDF as ``move_ik``.
+    chain = arm._ensure_chain()
+
+    captures: list[dict] = []
+    for name, joints in raw_points.items():
+        try:
+            joints = [float(j) for j in joints]
+        except (TypeError, ValueError):
+            console.print(
+                f"[yellow]Skipping {name}: joints are not numeric.[/yellow]"
+            )
+            continue
+        if len(joints) != 6:
+            console.print(
+                f"[yellow]Skipping {name}: expected 6 joint values, "
+                f"got {len(joints)}.[/yellow]"
+            )
+            continue
+
+        console.print(
+            f"[bold cyan]{name}[/bold cyan]: commanding "
+            f"{', '.join(f'{j:+.4f}' for j in joints)}"
+        )
+        with _handle_arm_not_running():
+            arrived = arm.stream_command(joints, duration=settle_time)
+        if not arrived:
+            console.print(
+                f"[yellow]{name}: did not settle within {settle_time:.1f}s; "
+                "capturing anyway.[/yellow]"
+            )
+
+        if dwell > 0:
+            time.sleep(dwell)
+
+        with _handle_arm_not_running():
+            achieved = list(arm.get_joint_positions())
+
+        # Forward-kinematics on the *measured* joints gives the actual
+        # end-effector pose at capture time (commanded != achieved when
+        # the loop rate-limits or the arm has settled below tolerance).
+        joint_vec = np.zeros(len(chain.links))
+        joint_vec[1 : 1 + len(achieved)] = achieved
+        ee_pose = chain.forward_kinematics(joint_vec)
+
+        try:
+            color, intrinsics, ts_ns = camera.get_color_frame()
+        except CameraNotRunningError as exc:
+            console.print(f"[bold red]{exc}[/bold red]")
+            raise click.exceptions.Exit(code=1) from exc
+
+        image_rel = Path("images") / f"{name}.png"
+        image_path = output_dir / image_rel
+        cv2.imwrite(str(image_path), color)
+
+        captures.append({
+            "name": name,
+            "commanded_joints": joints,
+            "achieved_joints": [float(v) for v in achieved],
+            "ee_pose_4x4": [[float(v) for v in row] for row in ee_pose],
+            "image": str(image_rel),
+            "image_timestamp_ns": ts_ns,
+            "color_intrinsics": {
+                "width": int(intrinsics.width),
+                "height": int(intrinsics.height),
+                "fx": float(intrinsics.fx),
+                "fy": float(intrinsics.fy),
+                "ppx": float(intrinsics.ppx),
+                "ppy": float(intrinsics.ppy),
+            },
+        })
+        console.print(f"[green]{name} captured[/green] -> {image_rel}")
+
+    manifest = {
+        "points_file": str(Path(points_file).resolve()),
+        "settle_time_s": settle_time,
+        "dwell_s": dwell,
+        "captures": captures,
+    }
+    manifest_path = output_dir / "manifest.json"
+    with open(manifest_path, "w") as f:
+        json.dump(manifest, f, indent=2)
+
+    console.print(
+        f"[bold green]Done.[/bold green] Captured {len(captures)} pose(s); "
+        f"manifest written to {manifest_path}."
+    )

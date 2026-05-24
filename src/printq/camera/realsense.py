@@ -38,8 +38,6 @@ from logging import getLogger
 import cv2
 import numpy as np
 import pyrealsense2 as rs
-import base64
-from ultralytics import YOLO
 
 logger = getLogger(__name__)
 
@@ -497,19 +495,16 @@ class RealsenseCamera:
     DEFAULT_READ_TIMEOUT_S = 2.0
 
     WINDOW_NAME = "Realsense Camera"
-    model = YOLO("yolov8n.pt")
-    depth_scale = None
-    align = None
+    QC_WINDOW_NAME = "RealSense Object & Distance Tracker"
+
+    # Lazily-loaded YOLO model shared across calls to :meth:`get_obj` /
+    # :meth:`detect_objects`. Loading the weights costs ~hundreds of MB
+    # of RAM + first-call latency, so we defer it until a caller asks
+    # for object detection. Stored at the class level so every instance
+    # reuses the same loaded model.
+    _yolo_model = None
+
     def __init__(self, serial: str | None = None):
-
-        """Initialize the Realsense camera."""
-        self.pipeline = rs.pipeline()
-        depth_sensor =  self.pipeline.start().get_device().first_depth_sensor()
-        self.depth_scale = depth_sensor.get_depth_scale()
-
-        align_to = rs.stream.color
-        self.align = rs.align(align_to)
-
         """Construct a camera handle.
 
         IMPORTANT: This constructor does NOT open the camera or create
@@ -984,65 +979,77 @@ class RealsenseCamera:
         """Backwards-compat alias for :meth:`stop`."""
         self.stop()
 
+    # ================================================================ QC helpers
+    # The following helpers are CLIENT-side: they read from the iceoryx2
+    # services published by the camera child process. They do NOT open
+    # the camera, so they're safe to call from any consumer process as
+    # long as ``printq camera start-server`` is running somewhere.
 
-    def take_pic(self):
-        color_frame = self.get_rgb_frame()
-        color_image = np.asanyarray(color_frame.get_data())
+    @classmethod
+    def _get_yolo_model(cls):
+        """Lazy-load and cache the YOLO model on first use.
 
-        # 2. Encode the image into a memory buffer (e.g., as a JPG)
-        # '.jpg' or '.png' both work here
-        success, buffer = cv2.imencode('.jpg', color_image)
+        Kept off the import path because ultralytics pulls in torch +
+        CUDA bindings and the weight load is ~hundreds of MB. Importing
+        :mod:`printq.camera.realsense` shouldn't pay that cost unless
+        the caller actually needs object detection.
+        """
+        if cls._yolo_model is None:
+            import importlib
 
-        if success:
-            # 3. Convert the buffer to Base64 bytes
-            jpg_as_text = base64.b64encode(buffer)
-            
-            # 4. Optional: Convert bytes to a UTF-8 string for JSON/HTML
-            base64_string = jpg_as_text.decode('utf-8')
-            
-            print(f"Base64 string starts with: {base64_string[:50]}...")
-            return base64_string
-        
-    def show_obj(self):
-        frames = self.pipeline.wait_for_frames()
+            yolo_cls = importlib.import_module("ultralytics").YOLO
+            cls._yolo_model = yolo_cls("yolov8n.pt")
+        return cls._yolo_model
 
-        # Align the depth frame to color frame
-        aligned_frames = self.align.process(frames)
-        
-        # Get aligned frames
-        depth_frame = aligned_frames.get_depth_frame()
-        color_frame = aligned_frames.get_color_frame()
+    def take_pic(self, timeout: float | None = None) -> str:
+        """Grab the latest color frame and return it base64-encoded JPEG.
 
-        if not depth_frame or not color_frame:
-            print("Could not acquire depth or color frames.")
-            return
+        Reads from the publisher via :meth:`get_color_frame`, so it
+        requires ``printq camera start-server`` to be running.
+        """
+        color_image, _intr, _ts = self.get_color_frame(timeout=timeout)
+        success, buffer = cv2.imencode(".jpg", color_image)
+        if not success:
+            raise RuntimeError("cv2.imencode('.jpg', ...) failed")
+        return base64.b64encode(buffer).decode("utf-8")
 
-        # Convert images to numpy arrays
-        depth_image = np.asanyarray(depth_frame.get_data())
-        color_image = np.asanyarray(color_frame.get_data())
+    def get_obj(self, timeout: float | None = None) -> None:
+        """Run YOLO object detection on the latest color frame and overlay
+        depth-based distance estimates per detection.
 
-        # 3. Run Object Detection
-        # We run YOLO on the color image
-        results = self.model(color_image, stream=True, verbose=False)
+        Reads color + (color-aligned) depth from the iceoryx2 services
+        published by the camera server. The depth stream is published
+        aligned to color, so we can index ``depth[v, u]`` against the
+        same pixel coordinate as ``color[v, u]`` without any extra
+        ``rs.align`` step.
+        """
+        color_image, _color_intr, _ = self.get_color_frame(timeout=timeout)
+        depth_image, depth_intr, _ = self.get_depth_frame(timeout=timeout)
+        depth_scale = float(depth_intr.depth_scale_m_per_unit)
+
+        # Defensive: the publisher aligns depth to color, but if a caller
+        # ever wired different resolutions we'd index out of bounds below.
+        if depth_image.shape[:2] != color_image.shape[:2]:
+            depth_image = cv2.resize(
+                depth_image,
+                (color_image.shape[1], color_image.shape[0]),
+                interpolation=cv2.INTER_NEAREST,
+            )
+
+        model = self._get_yolo_model()
+        results = model(color_image, stream=True, verbose=False)
 
         for result in results:
-            boxes = result.boxes
-            for box in boxes:
-                # Get bounding box coordinates [x1, y1, x2, y2]
+            for box in result.boxes:
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
-                # print(f"Detected object with bounding box: ({x1}, {y1}), ({x2}, {y2})")
-                
-                # Get class name (e.g., 'cup', 'cell phone', 'person')
                 cls_id = int(box.cls[0])
-                class_name = self.model.names[cls_id]
+                class_name = model.names[cls_id]
 
-                # 4. Calculate Distance
-                # Extract the depth data strictly inside the bounding box
+                # Median depth inside the box, ignoring zero/dead pixels
+                # so background holes at the edges don't pull the
+                # estimate.
                 depth_crop = depth_image[y1:y2, x1:x2].astype(float)
-                
-                # Filter out zero values (errors/dead pixels in the depth map)
                 depth_crop = depth_crop[depth_crop > 0]
-
                 if len(depth_crop) > 0:
                     # Use median instead of mean to ignore background noise at the edges
                     median_depth = np.median(depth_crop)
@@ -1051,20 +1058,20 @@ class RealsenseCamera:
                 else:
                     distance_str = "Unknown"
 
-                # 5. Draw Overlays
-                # Draw Bounding Box (Green)
                 cv2.rectangle(color_image, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                
-                # Draw Label & Distance Background (so text is readable)
                 label = f"{class_name} | {distance_str}"
-                (w, h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
-                cv2.rectangle(color_image, (x1, y1 - 25), (x1 + w, y1), (0, 255, 0), -1)
-                
-                # Draw Text (Black text on Green background)
-                cv2.putText(color_image, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+                (w, h), _ = cv2.getTextSize(
+                    label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2,
+                )
+                cv2.rectangle(
+                    color_image, (x1, y1 - 25), (x1 + w, y1), (0, 255, 0), -1,
+                )
+                cv2.putText(
+                    color_image, label, (x1, y1 - 5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2,
+                )
 
-        # Show the final image with overlays
-        cv2.imshow('RealSense Object & Distance Tracker', color_image)
+        cv2.imshow(self.QC_WINDOW_NAME, color_image)
 
     def get_obj(self):
         frames = self.pipeline.wait_for_frames()

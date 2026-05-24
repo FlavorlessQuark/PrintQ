@@ -46,43 +46,60 @@ def start_loop():
 
 @camera_commands.command(name="start")
 def start():
-    """Start the camera and stream the depth feed until 'q' is pressed."""
-    import base64
+    """Run the print-quality monitoring loop.
+
+    This is a CLIENT of the camera publisher: it subscribes to color +
+    depth over iceoryx2 and runs YOLO + Qwen on captured frames. The
+    publisher must already be running -- start it in another terminal
+    with ``printq camera start-server``.
+
+    Keybindings (focus the OpenCV window):
+
+        q   quit
+        s   toggle the on-screen preview
+        d   capture, send to Qwen for QC verdict, publish to Redis
+    """
     import json
 
     import cv2
-    import numpy as np
 
-    from printq.camera.realsense import RealsenseCamera
+    camera = _new_client()
+    # Fail fast if no publisher is up; otherwise the first frame read
+    # would block on the iceoryx2 timeout and the user would see a less
+    # helpful error.
+    with _handle_camera_not_running():
+        camera.get_heartbeat()
 
-    camera = RealsenseCamera()
     qwen = Qwen()
-    show = 1
+    show = True
     threading.Thread(target=start_loop, daemon=True).start()
     try:
         while True:
             if show:
                 camera.show_frame()
                 camera.get_obj()
-            # waitKey(1) both pumps the OpenCV GUI event loop (so the window
-            # updates) and polls for a quit key. Returns -1 if no key.
-            key = cv2.waitKey(1)
-            if key:
-                match key & 0xFF:
-                    case 113:#q
-                        break
-                    case 115:#s
-                        show ^= 1
-                    case 100:#d
-                        show ^= 1
-                        pic = camera.take_pic()
-                        status, message = qwen.get_print_status(pic)
-                        r.publish('status', json.dumps({
-                                    "success": status,
-                                    "desc": message,
-                                    "image": pic}))
+            # waitKey(1) pumps the OpenCV GUI event loop AND polls for a
+            # keypress. Returns -1 (==255 after & 0xFF) when no key is
+            # pressed, so we filter that out before matching.
+            key = cv2.waitKey(1) & 0xFF
+            if key == 0xFF:
+                continue
+            match key:
+                case 113:  # 'q'
+                    break
+                case 115:  # 's'
+                    show = not show
+                case 100:  # 'd'
+                    show = not show
+                    pic = camera.take_pic()
+                    status, message = qwen.get_print_status(pic)
+                    r.publish("status", json.dumps({
+                        "success": status,
+                        "desc": message,
+                        "image": pic,
+                    }))
     finally:
-        camera.close()
+        cv2.destroyAllWindows()
 
 
 def _new_client() -> RealsenseCamera:

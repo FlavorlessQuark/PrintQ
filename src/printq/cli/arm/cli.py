@@ -1,4 +1,23 @@
-""" ARM utility commands."""
+"""ARM utility commands.
+
+The CLI is the primary test harness for the iceoryx2 services exposed by
+:class:`printq.arm.piper.PiperArm`. There are two kinds of commands:
+
+  * ``printq arm start`` is the *server*: it spawns the control-loop child
+    process that owns CAN and keeps it alive until Ctrl-C, then cleanly
+    stops the loop (which in turn commands the arm to zero and disables
+    the motors).
+
+  * Every other command (``go-to-*``, ``set-gripper``, ``status``,
+    ``send-command``, ``estop``, ``clear-estop``, ``control``,
+    ``run-print-cycle``) is a *client*: it publishes to / subscribes from
+    the iceoryx2 services and fails with a clear error message if the
+    control loop is not running.
+
+``calibrate`` is special: it does NOT go through iceoryx2 (it needs
+direct per-motor control), and it refuses to run when a control loop is
+detected.
+"""
 
 from contextlib import contextmanager
 from logging import getLogger
@@ -14,7 +33,7 @@ if TYPE_CHECKING:
     from printq.arm.piper import PiperArm
 
 logger = getLogger(__name__)
-chain = None
+
 
 @click.group(name="arm")
 @click.pass_context
@@ -23,14 +42,81 @@ def arm_commands(ctx):
     ctx.ensure_object(dict)
 
 
+# ----------------------------------------------------------------------- helpers
+
+
+def _new_client() -> "PiperArm":
+    """Return a fresh service-only :class:`PiperArm`.
+
+    The constructor does not touch CAN, so this is safe to call from any
+    one-shot CLI subcommand. The first method invocation will lazily set
+    up the iceoryx2 node and (where required) verify that a control loop
+    is alive.
+    """
+    from printq.arm.piper import PiperArm
+
+    return PiperArm()
+
+
+@contextmanager
+def _handle_arm_not_running():
+    """Translate :class:`ArmNotRunningError` into a clean CLI failure."""
+    from printq.arm.piper import ArmNotRunningError
+
+    try:
+        yield
+    except ArmNotRunningError as exc:
+        console.print(f"[bold red]{exc}[/bold red]")
+        raise click.exceptions.Exit(code=1) from exc
+
+
+def _mode_label(mode: int) -> str:
+    from printq.arm.piper import ControlMode
+
+    return {
+        ControlMode.IDLE: "IDLE",
+        ControlMode.TRACKING: "TRACKING",
+        ControlMode.HOLDING: "HOLDING",
+        ControlMode.ESTOPPED: "ESTOPPED",
+        ControlMode.DISABLED: "DISABLED",
+    }.get(mode, f"UNKNOWN({mode})")
+
+
+def _flag_labels(flags: int) -> list[str]:
+    from printq.arm.piper import ControlFlags
+
+    out = []
+    for name in (
+        "WATCHDOG_TRIPPED",
+        "ESTOP_ACTIVE",
+        "OUT_OF_BOUNDS",
+        "RATE_LIMITED",
+        "CYCLE_OVERRUN",
+        "CAN_ERROR",
+    ):
+        bit = getattr(ControlFlags, name)
+        if flags & bit:
+            out.append(name)
+    return out
+
+
 def _print_status(piper_arm: "PiperArm") -> None:
-    """Render the arm's current joint positions and gripper state."""
+    """Subscribe to feedback/gripper/heartbeat and render a single snapshot."""
     import math
 
     from rich.table import Table
 
+    heartbeat = piper_arm.get_heartbeat()
     joint_positions = piper_arm.get_joint_positions()
     gripper_angle, gripper_effort = piper_arm.get_gripper_state()
+
+    hb_table = Table(title="Control Loop", title_style="bold cyan")
+    hb_table.add_column("Field", style="bold")
+    hb_table.add_column("Value", justify="right")
+    hb_table.add_row("Cycle", str(int(heartbeat.cycle)))
+    hb_table.add_row("Mode", _mode_label(int(heartbeat.mode)))
+    flags = _flag_labels(int(heartbeat.flags))
+    hb_table.add_row("Flags", ", ".join(flags) if flags else "—")
 
     joints_table = Table(title="ARM Joint Positions", title_style="bold cyan")
     joints_table.add_column("Joint", style="bold", justify="left")
@@ -50,104 +136,246 @@ def _print_status(piper_arm: "PiperArm") -> None:
     gripper_table.add_row("Angle", f"{gripper_angle:.4f}")
     gripper_table.add_row("Effort", f"{gripper_effort:.4f}")
 
+    console.print(hb_table)
     console.print(joints_table)
     console.print(gripper_table)
 
 
-@contextmanager
-def _disable_on_interrupt(piper_arm: "PiperArm"):
-    """Context manager: on ``KeyboardInterrupt``, disable the arm gracefully.
-
-    Catches ``KeyboardInterrupt`` raised inside the ``with`` block (whether
-    from a real Ctrl-C or from code that explicitly raises it) and runs
-    ``piper_arm.disable()`` to return the arm to zero and power down the
-    motors. Other exceptions propagate unchanged.
-    """
-    try:
-        yield
-    except KeyboardInterrupt:
-        logger.info("Interrupt received - disabling arm gracefully.")
-        piper_arm.disable()
-        logger.info("Exiting.")
-
-
-def _hold_until_interrupt(piper_arm: "PiperArm") -> None:
-    """Block until the user sends Ctrl-C, then disable the arm.
-
-    While holding, the operator can press ``s`` at any time to print the
-    current arm status without exiting. Ctrl-C ends the hold, disables
-    the arm gracefully, and exits.
-    """
-    console.print(
-        "\n[yellow]Holding pose. "
-        "Press [bold]s[/bold] to read status, "
-        "or [bold]Ctrl-C[/bold] to disable the arm and exit.[/yellow]"
-    )
-    with _disable_on_interrupt(piper_arm):
-        while True:
-            # click.getchar() returns a single character without requiring
-            # Enter. On Unix it doesn't raise on Ctrl-C; it returns '\x03'
-            # instead, so handle that explicitly. On Windows it raises
-            # KeyboardInterrupt, which the context manager still catches.
-            ch = click.getchar()
-            if ch in ("\x03", "\x04"):  # Ctrl-C, Ctrl-D
-                raise KeyboardInterrupt
-            if ch.lower() == "s":
-                _print_status(piper_arm)
+# --------------------------------------------------------------------- commands
 
 
 @arm_commands.command(name="activate")
 def activate():
-    """Activate all CAN ports"""
-    # Set up the connection to the Piper arm.
-    # These steps require sudo access.
+    """Activate all CAN ports (requires sudo)."""
     from piper_control import piper_connect
 
-    # Print out the CAN ports that are available to connect.
     logger.info(f"CAN ports: {piper_connect.find_ports()}")
-
-    # Activate all the ports so that you can connect to any arms connected to your
-    # machine.
     piper_connect.activate()
-
-    # Check to see that all the ports are active.
     logger.info(f"Active ports: {piper_connect.active_ports()}")
+
+
+@arm_commands.command(name="start")
+@click.option(
+    "--can-port",
+    type=str,
+    default="can0",
+    show_default=True,
+    help="CAN interface name (e.g. can0).",
+)
+@click.option(
+    "--frequency",
+    "control_frequency_hz",
+    type=click.FloatRange(1.0, 500.0),
+    default=None,
+    help="Control loop frequency in Hz. Defaults to PiperArm.DEFAULT_CONTROL_FREQUENCY_HZ.",
+)
+@click.option(
+    "--watchdog",
+    "watchdog_timeout_s",
+    type=click.FloatRange(0.01, 5.0),
+    default=None,
+    help="Seconds without a fresh command before falling back to HOLDING mode.",
+)
+def start(
+    can_port: str,
+    control_frequency_hz: float | None,
+    watchdog_timeout_s: float | None,
+):
+    """Start the PiperArm control loop and stream a live status until Ctrl-C.
+
+    This is a long-running command: it spawns the iceoryx2 control loop
+    in a child process (which owns CAN), then prints a heartbeat
+    summary periodically. Press Ctrl-C to stop the loop; the child
+    will command the arm back to zero and disable motors before
+    exiting.
+    """
+    import time
+
+    from printq.arm.piper import ArmNotRunningError, PiperArm
+
+    arm = PiperArm(can_port=can_port)
+    arm.start(
+        control_frequency_hz=control_frequency_hz,
+        watchdog_timeout_s=watchdog_timeout_s,
+    )
+
+    pid = arm._publisher_process.pid if arm._publisher_process else None
+    console.print(
+        f"[bold green]PiperArm control loop started[/bold green] "
+        f"(pid={pid}, freq={arm.control_frequency_hz:.1f} Hz). "
+        "Press [bold]Ctrl-C[/bold] to stop."
+    )
+
+    # Wait for the first heartbeat. If the child dies during setup (e.g.
+    # CAN init, stale iceoryx2 service config), we want to surface that
+    # clearly rather than blame a missing heartbeat.
+    try:
+        arm.get_heartbeat(timeout=5.0)
+    except ArmNotRunningError as exc:
+        if arm.is_running():
+            console.print(f"[bold red]{exc}[/bold red]")
+        else:
+            console.print(
+                "[bold red]Control loop child exited during startup. "
+                "Check the traceback above (common causes: CAN bus not activated, "
+                "or stale iceoryx2 services from a previous run -- "
+                "try wiping /tmp/iceoryx2 if you keep hitting this).[/bold red]"
+            )
+        arm.stop()
+        raise click.exceptions.Exit(code=1) from exc
+
+    try:
+        while arm.is_running():
+            try:
+                hb = arm.get_heartbeat(timeout=2.0)
+            except ArmNotRunningError as exc:
+                console.print(f"[red]Heartbeat lost: {exc}[/red]")
+                break
+
+            flags = _flag_labels(int(hb.flags))
+            console.print(
+                f"[dim]cycle={int(hb.cycle):>8} "
+                f"mode={_mode_label(int(hb.mode)):>9} "
+                f"flags={','.join(flags) if flags else '—'}[/dim]"
+            )
+            time.sleep(1.0)
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Stopping control loop...[/yellow]")
+    finally:
+        arm.stop()
+        console.print("[bold green]Control loop stopped.[/bold green]")
+
+
+@arm_commands.command(name="stop")
+def stop_command():
+    """Trigger an e-stop. Use Ctrl-C on 'printq arm start' to fully shut down.
+
+    There is no separate "stop the loop" RPC: the loop is a child of the
+    long-running ``printq arm start`` process, so killing that process
+    (with Ctrl-C or SIGTERM) is the supported way to bring it down.
+    This command publishes an e-stop instead, so the arm holds its
+    current pose if you cannot reach the start terminal.
+    """
+    arm = _new_client()
+    with _handle_arm_not_running():
+        arm.trigger_estop()
+    console.print(
+        "[bold red]E-stop triggered.[/bold red] "
+        "The control loop will hold the current pose. "
+        "Use [bold]printq arm clear-estop[/bold] to release."
+    )
+
+
+@arm_commands.command(name="estop")
+def estop_command():
+    """Latch the control loop into E-STOPPED (alias of 'arm stop')."""
+    arm = _new_client()
+    with _handle_arm_not_running():
+        arm.trigger_estop()
+    console.print("[bold red]E-stop latched.[/bold red]")
+
+
+@arm_commands.command(name="clear-estop")
+def clear_estop_command():
+    """Release a previously-latched e-stop."""
+    arm = _new_client()
+    with _handle_arm_not_running():
+        arm.clear_estop()
+    console.print("[bold yellow]E-stop released.[/bold yellow]")
+
 
 @arm_commands.command()
 def status():
-    """Get the status of the ARM"""
-    from printq.arm.piper import PiperArm
+    """Print the latest joint, gripper, and control-loop status snapshot."""
+    arm = _new_client()
+    with _handle_arm_not_running():
+        _print_status(arm)
 
-    piper_arm = PiperArm()
-    _print_status(piper_arm)
 
 @arm_commands.command(name="go-to-zero")
 def go_to_zero():
-    """Go to the zero position"""
-    from printq.arm.piper import PiperArm
+    """Command the arm to the zero pose."""
+    arm = _new_client()
+    with _handle_arm_not_running():
+        arm.go_to_zero()
 
-    piper_arm = PiperArm()
-    piper_arm.go_to_zero()
-    _hold_until_interrupt(piper_arm)
 
 @arm_commands.command(name="go-to-ready")
 def go_to_ready():
-    """Go to the ready position"""
-    from printq.arm.piper import PiperArm
+    """Command the arm to the ready pose."""
+    arm = _new_client()
+    with _handle_arm_not_running():
+        arm.go_to_ready()
 
-    piper_arm = PiperArm()
-    piper_arm.go_to_zero()
-    piper_arm.go_to_ready()
-    _hold_until_interrupt(piper_arm)
+
+@arm_commands.command(name="go-to-pregrasp")
+def go_to_pregrasp():
+    """Command the arm to the pre-grasp pose."""
+    arm = _new_client()
+    with _handle_arm_not_running():
+        arm.go_to_pregrasp()
+
 
 @arm_commands.command(name="go-to-scan")
 def go_to_scan():
-    """Go to the scan position"""
-    from printq.arm.piper import PiperArm
+    """Command the arm to the scan pose."""
+    arm = _new_client()
+    with _handle_arm_not_running():
+        arm.go_to_scan()
 
-    piper_arm = PiperArm()
-    piper_arm.go_to_scan()
-    _hold_until_interrupt(piper_arm)
+
+@arm_commands.command(name="go-to-good-bin")
+def go_to_good_bin():
+    """Command the arm to the good-bin drop-off pose."""
+    arm = _new_client()
+    with _handle_arm_not_running():
+        arm.go_to_good_bin()
+
+
+@arm_commands.command(name="go-to-bad-bin")
+def go_to_bad_bin():
+    """Command the arm to the bad-bin drop-off pose."""
+    arm = _new_client()
+    with _handle_arm_not_running():
+        arm.go_to_bad_bin()
+
+
+@arm_commands.command(name="send-command")
+@click.option(
+    "--joints",
+    "joints",
+    type=str,
+    required=True,
+    help="Comma-separated joint targets in radians (1-6 values).",
+)
+@click.option(
+    "--priority",
+    type=int,
+    default=0,
+    show_default=True,
+    help="Priority for multi-publisher arbitration.",
+)
+@click.option(
+    "--max-velocity",
+    "max_velocity",
+    type=str,
+    default=None,
+    help=(
+        "Optional comma-separated per-joint velocity caps in rad/s. "
+        "Must have 6 entries; use 0 to defer to the loop's default cap."
+    ),
+)
+def send_command(joints: str, priority: int, max_velocity: str | None):
+    """Publish a raw joint-position command to the control loop."""
+    arm = _new_client()
+    targets = [float(x.strip()) for x in joints.split(",") if x.strip()]
+    vlimit = None
+    if max_velocity:
+        vlimit = tuple(float(x.strip()) for x in max_velocity.split(",") if x.strip())
+    with _handle_arm_not_running():
+        arm.send_command(targets, priority=priority, max_velocity=vlimit)
+    console.print(f"[green]Published command:[/green] targets={targets} priority={priority}")
+
 
 def _prompt_ik_target() -> tuple[float, float, float]:
     """Prompt the operator for an end-effector target (meters)."""
@@ -162,43 +390,15 @@ def _prompt_ik_target() -> tuple[float, float, float]:
 @click.option("--y", type=float, default=None, help="Target y in meters.")
 @click.option("--z", type=float, default=None, help="Target z in meters.")
 def move_ik(x: float | None, y: float | None, z: float | None):
-    """Move to a position using inverse kinematics"""
-    from printq.arm.piper import PiperArm
-
-    piper_arm = PiperArm()
+    """Solve IK for an (x, y, z) end-effector target and publish the joints."""
+    arm = _new_client()
     if x is None or y is None or z is None:
         target = _prompt_ik_target()
     else:
         target = (x, y, z)
-    piper_arm.move_ik(target)
-    _hold_until_interrupt(piper_arm)
+    with _handle_arm_not_running():
+        arm.move_ik(target)
 
-@arm_commands.command(name="go-to-good-bin")
-def go_to_good_bin():
-    """Go to the good bin position"""
-    from printq.arm.piper import PiperArm
-
-    piper_arm = PiperArm()
-    piper_arm.go_to_good_bin()
-    _hold_until_interrupt(piper_arm)
-
-@arm_commands.command(name="go-to-bad-bin")
-def go_to_bad_bin():
-    """Go to the bad bin position"""
-    from printq.arm.piper import PiperArm
-
-    piper_arm = PiperArm()
-    piper_arm.go_to_bad_bin()
-    _hold_until_interrupt(piper_arm)
-
-@arm_commands.command(name="go-to-pregrasp")
-def go_to_pregrasp():
-    """Go to the pre-grasp position"""
-    from printq.arm.piper import PiperArm
-
-    piper_arm = PiperArm()
-    piper_arm.go_to_pregrasp()
-    _hold_until_interrupt(piper_arm)
 
 @arm_commands.command(name="set-gripper")
 @click.option(
@@ -207,11 +407,15 @@ def go_to_pregrasp():
     default=None,
     help="Gripper position: 0.0=fully closed, 10.0=fully open",
 )
-def set_gripper_command(position: float | None):
-    """Set the gripper to a user-provided position from 0.0 to 10.0"""
-    from printq.arm.piper import PiperArm
-
-    piper_arm = PiperArm()
+@click.option(
+    "--effort",
+    type=float,
+    default=None,
+    help="Gripper effort (default uses the controller's default).",
+)
+def set_gripper_command(position: float | None, effort: float | None):
+    """Command the gripper to a position from 0.0 to 10.0."""
+    arm = _new_client()
 
     if position is None:
         position = click.prompt(
@@ -220,118 +424,132 @@ def set_gripper_command(position: float | None):
             default=0.0,
         )
 
-    piper_arm.set_gripper(position)
-    _hold_until_interrupt(piper_arm)
+    with _handle_arm_not_running():
+        arm.set_gripper(position, effort=effort)
+
+
+@arm_commands.command(name="open-gripper")
+def open_gripper_command():
+    """Fully open the gripper."""
+    arm = _new_client()
+    with _handle_arm_not_running():
+        arm.open_gripper()
+
+
+@arm_commands.command(name="close-gripper")
+def close_gripper_command():
+    """Fully close the gripper."""
+    arm = _new_client()
+    with _handle_arm_not_running():
+        arm.close_gripper()
+
 
 @arm_commands.command(name="control")
 def control():
-    """Interactively move the arm and gripper between presets until Ctrl-C.
+    """Interactively dispatch preset poses / gripper actions until Ctrl-C / 'q'.
 
-    Presents a menu of preset arm positions and gripper actions on each
-    iteration. Press the number key for an entry to dispatch it, then
-    the menu reappears for the next selection. Ctrl-C (or 'q') exits
-    the loop, gracefully returns the arm to zero, and disables the motors.
+    Each menu pick publishes one command and returns to the menu. The
+    control loop continues to hold the last commanded pose between
+    selections (via its watchdog), so the menu is purely a publisher.
+    Quitting the menu does NOT stop the loop.
     """
     from rich.table import Table
 
-    from printq.arm.piper import PiperArm
+    arm = _new_client()
 
-    piper_arm = PiperArm()
     def _set_gripper_prompt() -> None:
         gripper_position = click.prompt(
             "Gripper position? 0.0=fully closed, 10.0=fully open",
             type=click.FloatRange(0.0, 10.0),
             default=0.0,
         )
-        piper_arm.set_gripper(gripper_position)
+        arm.set_gripper(gripper_position)
 
     def _move_ik_prompt() -> None:
-        piper_arm.move_ik(_prompt_ik_target())
+        arm.move_ik(_prompt_ik_target())
 
-    positions: list[tuple[str, "Callable[[], None]"]] = [
-        ("zero", piper_arm.go_to_zero),
-        ("ready", piper_arm.go_to_ready),
-        ("pre-grasp", piper_arm.go_to_pregrasp),
-        ("scan", piper_arm.go_to_scan),
-        ("good bin", piper_arm.go_to_good_bin),
-        ("bad bin", piper_arm.go_to_bad_bin),
-        ("open gripper", piper_arm.open_gripper),
-        ("close gripper", piper_arm.close_gripper),
-        ("move ik", _move_ik_prompt),
-        ("set gripper position", _set_gripper_prompt),
+    # (key, label, action). Keys are intentionally single characters so
+    # ``click.getchar()`` can dispatch immediately on the first keystroke
+    # — no Enter required, no ambiguity between "1" and "11". Digits are
+    # reserved for the named poses; mnemonic letters cover the actions.
+    actions: list[tuple[str, str, "Callable[[], None]"]] = [
+        ("1", "zero", arm.go_to_zero),
+        ("2", "ready", arm.go_to_ready),
+        ("3", "pre-grasp", arm.go_to_pregrasp),
+        ("4", "scan", arm.go_to_scan),
+        ("5", "good bin", arm.go_to_good_bin),
+        ("6", "bad bin", arm.go_to_bad_bin),
+        ("o", "open gripper", arm.open_gripper),
+        ("c", "close gripper", arm.close_gripper),
+        ("i", "move ik", _move_ik_prompt),
+        ("g", "set gripper position", _set_gripper_prompt),
+        ("s", "status", lambda: _print_status(arm)),
     ]
+    action_map = {key.lower(): (label, fn) for key, label, fn in actions}
 
     def _show_menu() -> None:
-        table = Table(title="Go To", title_style="bold cyan")
+        table = Table(title="PiperArm Control", title_style="bold cyan")
         table.add_column("Key", style="bold yellow", justify="right")
-        table.add_column("Position", style="bold")
-        for i, (label, _) in enumerate(positions, start=1):
-            table.add_row(str(i), label)
+        table.add_column("Action", style="bold")
+        for key, label, _ in actions:
+            table.add_row(key, label)
+        table.add_row("q", "quit menu (control loop keeps running)")
         console.print(table)
         console.print(
-            f"[dim]Press [bold]1-{len(positions)}[/bold] to move, "
-            "or [bold]Ctrl-C[/bold] / [bold]q[/bold] to exit.[/dim]"
+            "[dim]Press a key to dispatch, or [bold]Ctrl-C[/bold] / "
+            "[bold]q[/bold] to exit. (Quitting does not stop the control "
+            "loop.)[/dim]"
         )
 
-    with _disable_on_interrupt(piper_arm):
-        while True:
-            _show_menu()
+    # Verify the loop is up before showing the menu so the user gets a
+    # clear error rather than failing on the first action.
+    with _handle_arm_not_running():
+        arm.get_heartbeat()
+
+    while True:
+        _show_menu()
+        try:
             ch = click.getchar()
-            if ch in ("\x03", "\x04") or ch.lower() == "q":
-                raise KeyboardInterrupt
-            if not ch.isdigit():
-                continue
-            idx = int(ch) - 1
-            if not (0 <= idx < len(positions)):
-                continue
-            label, action = positions[idx]
-            logger.info(f"Moving to {label} position...")
-            action()
+        except KeyboardInterrupt:
+            break
+        if ch in ("\x03", "\x04") or ch.lower() == "q":
+            break
+        entry = action_map.get(ch.lower())
+        if entry is None:
+            continue
+        label, action = entry
+        logger.info(f"Dispatching: {label}")
+        try:
+            with _handle_arm_not_running():
+                action()
+        except click.exceptions.Exit:
+            # _handle_arm_not_running already printed; drop back to the menu
+            # rather than terminating the whole control session.
+            continue
+
 
 @arm_commands.command(name="run-print-cycle")
 def run_print_cycle():
     """Run the full autonomous print pickup, scan, and sorting cycle."""
-    from printq.arm.piper import PiperArm
-
-    piper_arm = PiperArm()
+    arm = _new_client()
 
     def get_ik_grasp_joints():
-        """Replace this with actual IK output."""
-        import ik
-
-        # if ik.py has a function that returns the final grasp joints:
-        # return ik.get_grasp_joint_positions()
-
-        # temporary hardcoded target using your existing IK function:
-        target_position = [0.3, 0.1, 0.4]
-        return ik.solve_ik_for_target(target_position)
+        """Replace this with actual IK target output."""
+        return [0.3, 0.1, 0.4]
 
     def get_bambu_gripper_close_value():
-        """Replace this with Bambu Lab print-derived gripping logic"""
-
-        # Temporary safe default. Tune this on the actual print.
+        """Replace this with Bambu Lab print-derived gripping logic."""
         return 5.0
 
-        # Later example:
-        # from printq.bambu import get_current_print_grip_value
-        # return get_current_print_grip_value()
-
     def get_vlm_decision():
-        """Replace this with VLM quality-check result"""
-
-        # Temporary manual fallback for testing
-        decision = click.prompt(
+        """Replace this with VLM quality-check result."""
+        return click.prompt(
             "VLM decision? Type good or bad",
             type=click.Choice(["good", "bad"], case_sensitive=False),
         )
-        return decision
 
-        # Later example:
-        # from printq.vision.vlm import classify_current_print
-        # return classify_current_print()
-
-    with _disable_on_interrupt(piper_arm):
-        decision = piper_arm.run_print_cycle(
+    with _handle_arm_not_running():
+        decision = arm.run_print_cycle(
             get_ik_grasp_joints=get_ik_grasp_joints,
             get_bambu_gripper_close_value=get_bambu_gripper_close_value,
             get_vlm_decision=get_vlm_decision,
@@ -339,7 +557,15 @@ def run_print_cycle():
 
     console.print(f"Print cycle complete. Decision: {decision}")
 
+
 @arm_commands.command(name="calibrate")
+@click.option(
+    "--can-port",
+    type=str,
+    default="can0",
+    show_default=True,
+    help="CAN interface name (e.g. can0).",
+)
 @click.option(
     "--joints",
     "joints",
@@ -354,10 +580,14 @@ def run_print_cycle():
     default=False,
     help="Calibrate the gripper zero position.",
 )
-def calibrate(joints: bool, gripper: bool):
+def calibrate(can_port: str, joints: bool, gripper: bool):
     """Calibrate the ARM joints or the gripper.
 
-    Exactly one of --joints or --gripper must be provided.
+    Mutually exclusive with ``printq arm start``: this command opens its
+    own direct CAN connection and will refuse to run if a control loop
+    heartbeat is detected on the system.
+
+    Exactly one of ``--joints`` or ``--gripper`` must be provided.
     """
     if joints and gripper:
         raise click.UsageError(
@@ -368,8 +598,12 @@ def calibrate(joints: bool, gripper: bool):
 
     from printq.arm.piper import PiperArm
 
-    piper_arm = PiperArm()
-    if joints:
-        piper_arm.calibrate_joints()
-    else:
-        piper_arm.calibrate_gripper()
+    arm = PiperArm(can_port=can_port)
+    try:
+        if joints:
+            arm.calibrate_joints()
+        else:
+            arm.calibrate_gripper()
+    except RuntimeError as exc:
+        console.print(f"[bold red]{exc}[/bold red]")
+        raise click.exceptions.Exit(code=1) from exc

@@ -35,7 +35,8 @@ if __name__ == "__main__":
             time.sleep(1)
             arm.go_to_grasp()
             time.sleep(1)
-            camera.get_obj()
+            distance, bbox = camera.get_obj()
+            arm.move_ik(0, distance, 0.2, 0)
             pic = camera.take_pic()
             status, message = qwen.get_print_status(pic)
             r.publish('status', json.dumps({

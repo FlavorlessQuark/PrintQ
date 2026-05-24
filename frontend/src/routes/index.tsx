@@ -131,6 +131,11 @@ function Index() {
     if (current) setHistory((h) => [current, ...h].slice(0, 20));
     setCurrent(null);
     setArmState("idle");
+    try {
+      socketRef.current?.emit("start", { message: "start" });
+    } catch (err) {
+      console.warn("[PrintQ] next print start emit failed", err);
+    }
   };
 
   const handleDemo = () => {

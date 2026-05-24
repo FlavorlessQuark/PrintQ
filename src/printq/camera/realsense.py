@@ -1003,7 +1003,7 @@ class RealsenseCamera:
             print(f"Base64 string starts with: {base64_string[:50]}...")
             return base64_string
         
-    def get_obj(self):
+    def show_obj(self):
         frames = self.pipeline.wait_for_frames()
 
         # Align the depth frame to color frame
@@ -1065,3 +1065,49 @@ class RealsenseCamera:
 
         # Show the final image with overlays
         cv2.imshow('RealSense Object & Distance Tracker', color_image)
+
+    def get_obj(self):
+        frames = self.pipeline.wait_for_frames()
+
+        # Align the depth frame to color frame
+        aligned_frames = self.align.process(frames)
+        
+        # Get aligned frames
+        depth_frame = aligned_frames.get_depth_frame()
+        color_frame = aligned_frames.get_color_frame()
+
+        if not depth_frame or not color_frame:
+            print("Could not acquire depth or color frames.")
+            return
+
+        # Convert images to numpy arrays
+        depth_image = np.asanyarray(depth_frame.get_data())
+        color_image = np.asanyarray(color_frame.get_data())
+
+        # 3. Run Object Detection
+        # We run YOLO on the color image
+        results = self.model(color_image, stream=True, verbose=False)
+
+        for result in results:
+            boxes = result.boxes
+            for box in boxes:
+                # Get bounding box coordinates [x1, y1, x2, y2]
+                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                # print(f"Detected object with bounding box: ({x1}, {y1}), ({x2}, {y2})")
+                
+                # Get class name (e.g., 'cup', 'cell phone', 'person')
+                cls_id = int(box.cls[0])
+                class_name = self.model.names[cls_id]
+
+                # 4. Calculate Distance
+                # Extract the depth data strictly inside the bounding box
+                depth_crop = depth_image[y1:y2, x1:x2].astype(float)
+                
+                # Filter out zero values (errors/dead pixels in the depth map)
+                depth_crop = depth_crop[depth_crop > 0]
+
+                if len(depth_crop) > 0:
+                    # Use median instead of mean to ignore background noise at the edges
+                    median_depth = np.median(depth_crop)
+                    distance_meters = median_depth * self.depth_scale
+                    return distance_meters, (x1, y1, x2, y2)

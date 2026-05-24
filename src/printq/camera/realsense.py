@@ -3,19 +3,24 @@
 import cv2
 import numpy as np
 import pyrealsense2 as rs
-import open3d as o3d
 import base64
+from ultralytics import YOLO
 
 class RealsenseCamera:
     """Realsense camera wrapper."""
 
     WINDOW_NAME = "Realsense Camera"
-    PC = rs.pointcloud()
-
+    model = YOLO("yolov8n.pt")
+    depth_scale = None
+    align = None
     def __init__(self):
         """Initialize the Realsense camera."""
         self.pipeline = rs.pipeline()
-        self.pipeline.start()
+        depth_sensor =  self.pipeline.start().get_device().first_depth_sensor()
+        self.depth_scale = depth_sensor.get_depth_scale()
+
+        align_to = rs.stream.color
+        self.align = rs.align(align_to)
 
     def get_frames(self):
         """Get the latest synchronized (color, depth) frames from one capture.
@@ -61,22 +66,6 @@ class RealsenseCamera:
             return None
         return depth_frame
     
-    def get_point_cloud(self):
-        depth_frame = self.get_depth_frame()
-        
-        if not depth_frame:
-            return None
-
-        points = self.PC.calculate(depth_frame)
-        
-        v = points.get_vertices()
-        verts = np.asanyarray(v).view(np.float32).reshape(-1, 3)
-        
-        verts = verts[~np.all(verts == 0, axis=1)]
-
-        pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(verts)
-        return pcd
 
     def close(self):
         """Close the camera and any open OpenCV windows."""
@@ -86,8 +75,6 @@ class RealsenseCamera:
             # destroyAllWindows is idempotent: safe even if no window
             # was ever created (eg. if the first imshow crashed).
             cv2.destroyAllWindows()
-    def save_point_cloud(self):
-        o3d.io.write_point_cloud("p1.ply", self.get_point_cloud())
     def show_frame(self):
         """Display the latest color frame and depth colormap side-by-side."""
         color_frame, depth_frame = self.get_frames()
@@ -128,30 +115,83 @@ class RealsenseCamera:
         camera_name = specific_camera.get_info(rs.camera_info.name)
         print(f"Found RealSense camera: {camera_name} (Serial: {serial_number})")
 
-    import numpy as np
     def take_pic(self):
+        color_frame = self.get_rgb_frame()
+        color_image = np.asanyarray(color_frame.get_data())
 
+        # 2. Encode the image into a memory buffer (e.g., as a JPG)
+        # '.jpg' or '.png' both work here
+        success, buffer = cv2.imencode('.jpg', color_image)
 
-        try:
-            frames = self.pipeline.wait_for_frames()
-            color_frame = frames.get_color_frame()
+        if success:
+            # 3. Convert the buffer to Base64 bytes
+            jpg_as_text = base64.b64encode(buffer)
             
-            if not color_frame:
-                return None
+            # 4. Optional: Convert bytes to a UTF-8 string for JSON/HTML
+            base64_string = jpg_as_text.decode('utf-8')
             
-            # 3. Convert image to numpy array
-            color_image = np.asanyarray(color_frame.get_data())
-            
-            # 4. Encode to JPEG format (in memory)
-            # We use JPEG because raw RGB is massive; JPEG makes the base64 string smaller
-            success, encoded_img = cv2.imencode('.jpg', color_image)
-            
-            if success:
-                # 5. Convert to Base64
-                b64_string = base64.b64encode(encoded_img).decode('utf-8')
-                return b64_string
+            print(f"Base64 string starts with: {base64_string[:50]}...")
+            return base64_string
+        
+    def get_obj(self):
+        frames = self.pipeline.wait_for_frames()
+
+        # Align the depth frame to color frame
+        aligned_frames = self.align.process(frames)
+        
+        # Get aligned frames
+        depth_frame = aligned_frames.get_depth_frame()
+        color_frame = aligned_frames.get_color_frame()
+
+        if not depth_frame or not color_frame:
+            print("Could not acquire depth or color frames.")
+            return
+
+        # Convert images to numpy arrays
+        depth_image = np.asanyarray(depth_frame.get_data())
+        color_image = np.asanyarray(color_frame.get_data())
+
+        # 3. Run Object Detection
+        # We run YOLO on the color image
+        results = self.model(color_image, stream=True, verbose=False)
+
+        for result in results:
+            boxes = result.boxes
+            for box in boxes:
+                # Get bounding box coordinates [x1, y1, x2, y2]
+                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                # print(f"Detected object with bounding box: ({x1}, {y1}), ({x2}, {y2})")
                 
-        finally:
-            self.pipeline.stop()
+                # Get class name (e.g., 'cup', 'cell phone', 'person')
+                cls_id = int(box.cls[0])
+                class_name = self.model.names[cls_id]
 
-    
+                # 4. Calculate Distance
+                # Extract the depth data strictly inside the bounding box
+                depth_crop = depth_image[y1:y2, x1:x2].astype(float)
+                
+                # Filter out zero values (errors/dead pixels in the depth map)
+                depth_crop = depth_crop[depth_crop > 0]
+
+                if len(depth_crop) > 0:
+                    # Use median instead of mean to ignore background noise at the edges
+                    median_depth = np.median(depth_crop)
+                    distance_meters = median_depth * self.depth_scale
+                    distance_str = f"{distance_meters:.2f}m"
+                else:
+                    distance_str = "Unknown"
+
+                # 5. Draw Overlays
+                # Draw Bounding Box (Green)
+                cv2.rectangle(color_image, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                
+                # Draw Label & Distance Background (so text is readable)
+                label = f"{class_name} | {distance_str}"
+                (w, h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+                cv2.rectangle(color_image, (x1, y1 - 25), (x1 + w, y1), (0, 255, 0), -1)
+                
+                # Draw Text (Black text on Green background)
+                cv2.putText(color_image, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+
+        # Show the final image with overlays
+        cv2.imshow('RealSense Object & Distance Tracker', color_image)

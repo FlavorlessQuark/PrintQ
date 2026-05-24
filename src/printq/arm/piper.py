@@ -250,8 +250,9 @@ def _run_control_loop(
     The loop exits on SIGTERM / SIGINT (set up here) or on a fatal iceoryx2
     error from the wait primitives.
     """
-    import iceoryx2 as iox2  # local: avoids being imported at parent-import time
     import logging as _logging
+
+    import iceoryx2 as iox2  # local: avoids being imported at parent-import time
 
     # The "spawn" multiprocessing start method gives the child a fresh
     # interpreter with no logging handlers, so its info-level logs would
@@ -622,7 +623,9 @@ class PiperArm:
 
     JOINT_POSITIONS_ZERO = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
     JOINT_POSITIONS_READY = (0.04, 0.45, -1.5, 0.0, 1.0, 0.0)
-    JOINT_POSITIONS_PREGRASP = (0.02, 1.87, -0.53, 0.04, -1.24, 0.08)
+    # JOINT_POSITIONS_PREGRASP = (0.02, 1.87, -0.53, 0.04, -1.24, 0.08)
+    JOINT_POSITIONS_PREGRASP = (-0.0418, 1.7753, -1.3291, -0.0102, -0.1861, 0.0228)
+    JOINT_POSITIONS_GRASP = (-0.0705, 2.6633, -2.1799, -0.1648, -0.1409, 0.1268)
     JOINT_POSITIONS_SCAN = (1.23, -0.01, -0.52, -0.01, 0.58, 0.01)
     JOINT_POSITIONS_GOOD_BIN = (-0.46, 1.84, -0.72, 0.02, -0.69, 0.02)
     JOINT_POSITIONS_BAD_BIN = (0.63, 1.84, -0.73, 0.02, -0.69, 0.02)
@@ -1433,6 +1436,16 @@ class PiperArm:
             self.JOINT_POSITIONS_PREGRASP, duration=settle_time,
         )
         self._log_arrival("pre-grasp", arrived, settle_time)
+
+    def go_to_grasp(self, settle_time: float | None = None) -> None:
+        """Command the arm to the grasp pose (gripper stays at its current state)."""
+        if settle_time is None:
+            settle_time = self.DEFAULT_GO_TO_SETTLE_TIME_S
+        logger.info("Going to grasp position (timeout=%.1fs)", settle_time)
+        arrived = self.stream_command(
+            self.JOINT_POSITIONS_GRASP, duration=settle_time,
+        )
+        self._log_arrival("grasp", arrived, settle_time)
 
     def go_to_scan(self, settle_time: float | None = None) -> None:
         """Command the arm to the scan pose."""

@@ -1013,15 +1013,126 @@ class RealsenseCamera:
             raise RuntimeError("cv2.imencode('.jpg', ...) failed")
         return base64.b64encode(buffer).decode("utf-8")
 
-    def get_obj(self, timeout: float | None = None) -> None:
-        """Run YOLO object detection on the latest color frame and overlay
-        depth-based distance estimates per detection.
+    def show_obj(self, timeout: float | None = None) -> int:
+        """Run YOLO object detection on the latest color frame and display
+        it next to a colorized depth view, with depth-based distance
+        estimates per detection.
 
         Reads color + (color-aligned) depth from the iceoryx2 services
         published by the camera server. The depth stream is published
         aligned to color, so we can index ``depth[v, u]`` against the
         same pixel coordinate as ``color[v, u]`` without any extra
-        ``rs.align`` step.
+        ``rs.align`` step. The same bounding boxes are also drawn onto
+        the colorized depth panel so the user can visually correlate
+        detections with the depth signal.
+
+        Returns the number of bounding boxes drawn so callers can
+        distinguish "frame shown but nothing detected" from "frame shown
+        with N objects".
+        """
+        color_image, _color_intr, _ = self.get_color_frame(timeout=timeout)
+        depth_image, depth_intr, _ = self.get_depth_frame(timeout=timeout)
+        depth_scale = float(depth_intr.depth_scale_m_per_unit)
+
+        # Defensive: the publisher aligns depth to color, but if a caller
+        # ever wired different resolutions we'd index out of bounds below.
+        if depth_image.shape[:2] != color_image.shape[:2]:
+            depth_image = cv2.resize(
+                depth_image,
+                (color_image.shape[1], color_image.shape[0]),
+                interpolation=cv2.INTER_NEAREST,
+            )
+
+        depth_vis = self._depth_to_colormap(depth_image)
+
+        model = self._get_yolo_model()
+        results = model(color_image, stream=True, verbose=False)
+
+        num_detections = 0
+        for result in results:
+            for box in result.boxes:
+                num_detections += 1
+                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                cls_id = int(box.cls[0])
+                class_name = model.names[cls_id]
+
+                # Median depth inside the box, ignoring zero/dead pixels
+                # so background holes at the edges don't pull the
+                # estimate.
+                depth_crop = depth_image[y1:y2, x1:x2].astype(float)
+                depth_crop = depth_crop[depth_crop > 0]
+                if len(depth_crop) > 0:
+                    # Use median instead of mean to ignore background noise at the edges
+                    median_depth = np.median(depth_crop)
+                    distance_meters = median_depth * depth_scale
+                    distance_str = f"{distance_meters:.2f}m"
+                else:
+                    distance_str = "Unknown"
+
+                label = f"{class_name} | {distance_str}"
+                (w, h), _ = cv2.getTextSize(
+                    label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2,
+                )
+                # Same box + label on both panels so the user can
+                # visually correlate the detection with the depth signal.
+                for panel in (color_image, depth_vis):
+                    cv2.rectangle(panel, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    cv2.rectangle(
+                        panel, (x1, y1 - 25), (x1 + w, y1), (0, 255, 0), -1,
+                    )
+                    cv2.putText(
+                        panel, label, (x1, y1 - 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2,
+                    )
+
+        combined = np.hstack((color_image, depth_vis))
+        cv2.imshow(self.QC_WINDOW_NAME, combined)
+        return num_detections
+
+    def show_obj_loop(self, rate_hz: float = 1.0) -> None:
+        """Block, showing YOLO detections + depth distance until ``q`` / close.
+
+        Throttled to ``rate_hz`` because YOLO inference is much heavier
+        than the raw frame display in :meth:`show_frames_loop`; 1 Hz
+        keeps CPU/GPU load bounded while still giving a live view.
+
+        Between detection passes we still pump the OpenCV event loop in
+        small slices via ``cv2.waitKey`` so the window stays responsive
+        and ``q`` / Esc is picked up quickly (rather than only at the
+        next detection tick).
+        """
+        period_s = 1.0 / rate_hz if rate_hz > 0 else 0.0
+        try:
+            while True:
+                loop_start = time.monotonic()
+                try:
+                    self.show_obj()
+                except CameraNotRunningError as exc:
+                    logger.error("%s", exc)
+                    break
+                while True:
+                    elapsed = time.monotonic() - loop_start
+                    if elapsed >= period_s:
+                        break
+                    slice_ms = max(1, min(50, int((period_s - elapsed) * 1000)))
+                    key = cv2.waitKey(slice_ms) & 0xFF
+                    if key == ord("q") or key == 27:  # 'q' or Esc
+                        return
+        finally:
+            cv2.destroyAllWindows()
+
+    def get_obj(
+        self,
+        timeout: float | None = None,
+    ) -> tuple[float, tuple[int, int, int, int]] | None:
+        """Detect objects on the latest frame and return distance + bbox.
+
+        Reads color + (color-aligned) depth from the iceoryx2 services
+        published by the camera server (so ``printq camera start-server``
+        must be running). Runs YOLO on the color image and returns the
+        median in-bbox distance (meters) and pixel bbox of the *first*
+        detected object with valid depth, or ``None`` if nothing was
+        detected.
         """
         color_image, _color_intr, _ = self.get_color_frame(timeout=timeout)
         depth_image, depth_intr, _ = self.get_depth_frame(timeout=timeout)
@@ -1042,79 +1153,14 @@ class RealsenseCamera:
         for result in results:
             for box in result.boxes:
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
-                cls_id = int(box.cls[0])
-                class_name = model.names[cls_id]
 
-                # Median depth inside the box, ignoring zero/dead pixels
-                # so background holes at the edges don't pull the
-                # estimate.
                 depth_crop = depth_image[y1:y2, x1:x2].astype(float)
-                depth_crop = depth_crop[depth_crop > 0]
-                if len(depth_crop) > 0:
-                    # Use median instead of mean to ignore background noise at the edges
-                    median_depth = np.median(depth_crop)
-                    distance_meters = median_depth * self.depth_scale
-                    distance_str = f"{distance_meters:.2f}m"
-                else:
-                    distance_str = "Unknown"
-
-                cv2.rectangle(color_image, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                label = f"{class_name} | {distance_str}"
-                (w, h), _ = cv2.getTextSize(
-                    label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2,
-                )
-                cv2.rectangle(
-                    color_image, (x1, y1 - 25), (x1 + w, y1), (0, 255, 0), -1,
-                )
-                cv2.putText(
-                    color_image, label, (x1, y1 - 5),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2,
-                )
-
-        cv2.imshow(self.QC_WINDOW_NAME, color_image)
-
-    def get_obj(self):
-        frames = self.pipeline.wait_for_frames()
-
-        # Align the depth frame to color frame
-        aligned_frames = self.align.process(frames)
-        
-        # Get aligned frames
-        depth_frame = aligned_frames.get_depth_frame()
-        color_frame = aligned_frames.get_color_frame()
-
-        if not depth_frame or not color_frame:
-            print("Could not acquire depth or color frames.")
-            return
-
-        # Convert images to numpy arrays
-        depth_image = np.asanyarray(depth_frame.get_data())
-        color_image = np.asanyarray(color_frame.get_data())
-
-        # 3. Run Object Detection
-        # We run YOLO on the color image
-        results = self.model(color_image, stream=True, verbose=False)
-
-        for result in results:
-            boxes = result.boxes
-            for box in boxes:
-                # Get bounding box coordinates [x1, y1, x2, y2]
-                x1, y1, x2, y2 = map(int, box.xyxy[0])
-                # print(f"Detected object with bounding box: ({x1}, {y1}), ({x2}, {y2})")
-                
-                # Get class name (e.g., 'cup', 'cell phone', 'person')
-                cls_id = int(box.cls[0])
-                class_name = self.model.names[cls_id]
-
-                # 4. Calculate Distance
-                # Extract the depth data strictly inside the bounding box
-                depth_crop = depth_image[y1:y2, x1:x2].astype(float)
-                
-                # Filter out zero values (errors/dead pixels in the depth map)
+                # Drop zero/dead pixels so background holes don't bias
+                # the median.
                 depth_crop = depth_crop[depth_crop > 0]
 
                 if len(depth_crop) > 0:
-                    # Use median instead of mean to ignore background noise at the edges
-                    median_depth = np.median(depth_crop)
-                    distance_meters = median_depth * self.depth_scale
+                    median_depth = float(np.median(depth_crop))
+                    distance_meters = median_depth * depth_scale
                     return distance_meters, (x1, y1, x2, y2)
+        return None

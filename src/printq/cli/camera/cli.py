@@ -254,6 +254,40 @@ def show():
     camera.show_frames_loop()
 
 
+@camera_commands.command(name="show-obj")
+@click.option(
+    "--fps",
+    type=float,
+    default=1.0,
+    show_default=True,
+    help=(
+        "Detection + display rate in Hz. YOLO inference is heavy, so "
+        "the default of 1 Hz keeps CPU/GPU load bounded; raise it for "
+        "smoother tracking if your machine can keep up."
+    ),
+)
+def show_obj(fps: float):
+    """Subscribe to the camera, run YOLO at ``--fps``, and display detections.
+
+    Like ``show``, but each displayed frame is annotated with the YOLO
+    bounding boxes (and median in-bbox distance from the aligned depth
+    stream). Inference is throttled to ``--fps`` Hz to keep load
+    bounded.
+
+    Requires ``printq camera start-server`` to be running somewhere on
+    the host. Press ``q`` (or Esc) in the OpenCV window to quit.
+    Quitting does NOT stop the publisher.
+    """
+    if fps <= 0:
+        console.print("[bold red]--fps must be > 0[/bold red]")
+        raise click.exceptions.Exit(code=1)
+
+    camera = _new_client()
+    with _handle_camera_not_running():
+        camera.get_heartbeat()
+    camera.show_obj_loop(rate_hz=fps)
+
+
 @camera_commands.command(name="status")
 def status():
     """Print one heartbeat sample and exit (handy for scripts)."""

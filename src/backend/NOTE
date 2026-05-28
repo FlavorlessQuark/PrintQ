@@ -1,0 +1,19 @@
+Backend -----
+
+Summary:
+The backend will start the arm and wait for it to give it information about the print
+The backend will then call qwen to get it's summary of the print then it will wait for the user to press the "next" button on the frontend, and it will restart this process
+
+Specification:
+
+Backend <-> frontend communication via websocket
+Backend <-> arm communication via IPC (redis is good and easy to set up)
+For redis, see : // github link with example here
+
+Backend print quality data -> {percentage : number, info :string, image: bytes} ->frontend
+// image is a picture taken of the print
+
+Backend ready -> {message: "start"} -> arm
+
+Backend stop -> {message: "stop"} -> arm 
+// make sure the arm resets to 0 position before stopping
